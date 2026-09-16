@@ -30,6 +30,27 @@ type CacheEntry = {
 const responseCache = new Map<string, CacheEntry>();
 const pendingRequests = new Map<string, Promise<unknown>>();
 
+// Identifica a sessão atual para a chave do cache de GET. A sessão por cookie
+// sempre passa a MESMA constante COOKIE_AUTH_TOKEN como "token" — sem isto,
+// a chave do cache é idêntica para qualquer usuário autenticado por cookie, e
+// a resposta de um fica visível para o próximo que logar na mesma aba. É
+// atualizada a cada resposta de /api/auth/me (chamada ao validar a sessão) e
+// zerada por clearApiCache(). Ver SEC-01 em docs/auditoria-2026-09.md.
+let activeUserId: string | null = null;
+
+/**
+ * Esvazia o cache de respostas e o identificador de sessão. Deve ser chamada
+ * sempre que a identidade autenticada muda — logout, login e registro bem-
+ * sucedidos — para que a resposta de um usuário nunca sobreviva para o
+ * próximo. `clearSession()`/`rememberSession()` em lib/authSession.ts já
+ * chamam isto; não é preciso chamar manualmente nas páginas.
+ */
+export function clearApiCache(): void {
+  responseCache.clear();
+  pendingRequests.clear();
+  activeUserId = null;
+}
+
 const CSRF_COOKIE = "trevo_csrf";
 const CSRF_HEADER = "X-CSRF-Token";
 const CSRF_EXEMPT_PATHS = new Set(["/api/auth/login", "/api/auth/register"]);
@@ -56,7 +77,7 @@ async function ensureCsrfToken(): Promise<string | null> {
 }
 
 function cacheKey(path: string, token?: string | null) {
-  return `${token || "public"}::${path}`;
+  return `${token || "public"}::${activeUserId ?? ""}::${path}`;
 }
 
 function invalidateTokenCache(token?: string | null) {
@@ -197,7 +218,13 @@ export const api = {
     });
   },
   me(token: string) {
-    return request<User>("/api/auth/me", { token });
+    // Captura o id do usuário para diferenciar a chave do cache por sessão
+    // (ver activeUserId acima) — necessário porque toda sessão por cookie
+    // usa o mesmo "token" (COOKIE_AUTH_TOKEN).
+    return request<User>("/api/auth/me", { token }).then((user) => {
+      activeUserId = user.id;
+      return user;
+    });
   },
   updateProfile(token: string, payload: Partial<Pick<User, "name" | "avatar_url" | "send_monthly_summary">>) {
     return request<User>("/api/auth/me", { method: "PUT", token, body: JSON.stringify(payload) });
