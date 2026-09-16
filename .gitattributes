@@ -1,0 +1,5 @@
+# As fixtures de CSV testam parsing de encoding e delimitador byte a byte
+# (BOM UTF-8, Windows-1252, tabulação). `core.autocrlf=true` normalizaria as
+# quebras de linha no checkout e mudaria exatamente o que o teste verifica —
+# `-text` desliga qualquer conversão de fim de linha para esses arquivos.
+tests/fixtures/csv/*.csv -text -diff
