@@ -35,6 +35,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from starlette.concurrency import run_in_threadpool
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.responses import Response
 
 from app.core import storage
@@ -279,6 +280,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["Authorization", "Content-Type", "X-Card-Unlock-Token"],
 )
+# SEC-06: app/oauth.py deriva o redirect do fluxo OAuth de request.base_url,
+# que vem do header Host sem validação — um Host forjado produz um redirect
+# para domínio arbitrário depois do login. Só ativa quando TRUSTED_HOSTS está
+# configurado (ver Settings.trusted_hosts); sem isso, a ausência de allowlist
+# já é sinalizada em validate_runtime_config().
+if settings.trusted_hosts:
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.trusted_hosts)
 
 
 # Agregados caros (orçamento, metas) são pedidos várias vezes dentro da mesma
@@ -438,6 +446,13 @@ def validate_runtime_config() -> None:
             raise RuntimeError("ALLOWED_ORIGINS de produ\u00e7\u00e3o n\u00e3o deve apontar para localhost.")
         if "*" in origins:
             logger.warning("ALLOWED_ORIGINS is '*' in production. Use only during the first deploy and replace it with the public HTTPS URL.")
+        if not settings.trusted_hosts:
+            logger.warning(
+                "TRUSTED_HOSTS não está definida em produção. O header Host não é "
+                "validado, e o redirect do fluxo OAuth (app/oauth.py) confia nele "
+                "sem checagem (SEC-06). Defina TRUSTED_HOSTS com o(s) domínio(s) "
+                "público(s), separados por vírgula."
+            )
 
 
 def decode_token_metadata(token: str) -> tuple[str | None, datetime | None]:
@@ -791,6 +806,80 @@ def clear_login_failures(email: str) -> None:
             cursor.execute("DELETE FROM login_failures_state WHERE identifier_hash = %s", (key,))
     except Exception:
         logger.exception("Failed to clear login failure state")
+
+
+# Fallback em memória de processo para enforce_ip_rate_limit, usado só quando
+# o banco está fora do ar (fail-open não significa "sem limite nenhum"; ver
+# a função abaixo). Não substitui a persistência: em serverless cada
+# instância tem o seu, mas é melhor que nada durante uma falha transitória.
+ip_rate_limit_fallback: dict[str, dict[str, Any]] = {}
+
+
+def enforce_ip_rate_limit(request: Request, scope: str, max_attempts: int, window_seconds: int) -> None:
+    """Limite de tentativas por IP, persistido em Postgres.
+
+    O Limiter do slowapi (ver `limiter` acima) usa armazenamento em memória
+    de processo — verificado em runtime. Em serverless cada instância tem o
+    próprio contador, então o `@limiter.limit` nas rotas sensíveis
+    (cadastro, troca de senha, exclusão de conta, exportação de dados) é, na
+    prática, decorativo. Esta função implementa uma janela deslizante simples
+    por (scope, ip) na tabela `rate_limit_state`, com o mesmo desenho de
+    `enforce_login_rate_limit`.
+
+    Degrada com graça (fail-open): se o banco falhar, cai no fallback em
+    memória do processo e nunca bloqueia a requisição por indisponibilidade
+    de armazenamento — bloquear login/cadastro porque o banco piscou seria
+    pior do que o problema que isto resolve.
+    """
+    ip_hash = client_ip_hash(request)
+    if not ip_hash:
+        return
+    key = hashlib.sha256(f"{scope}:{ip_hash}".encode()).hexdigest()
+    now_dt = datetime.now(UTC)
+
+    if storage_available():
+        try:
+            with db_cursor(commit=True) as cursor:
+                cursor.execute(
+                    "SELECT window_start, count FROM rate_limit_state WHERE key_hash = %s",
+                    (key,),
+                )
+                row = normalize_row(cursor.fetchone())
+                window_start = as_utc_datetime(row.get("window_start")) if row else None
+                if not row or not window_start or (now_dt - window_start).total_seconds() > window_seconds:
+                    window_start = now_dt
+                    count = 1
+                else:
+                    count = int(row["count"]) + 1
+
+                cursor.execute(
+                    """
+                    INSERT INTO rate_limit_state (key_hash, window_start, count)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (key_hash)
+                    DO UPDATE SET window_start = EXCLUDED.window_start, count = EXCLUDED.count
+                    """,
+                    (key, window_start, count),
+                )
+            if count > max_attempts:
+                audit_log("rate_limited", None, {"scope": scope})
+                raise HTTPException(status_code=429, detail="Muitas tentativas. Tente novamente mais tarde.")
+            return
+        except HTTPException:
+            raise
+        except Exception:
+            logger.exception("Failed to enforce persisted rate limit for scope=%s", scope)
+
+    # Banco indisponível ou fora de serviço: fallback em memória do processo.
+    entry = ip_rate_limit_fallback.get(key)
+    now = now_dt.timestamp()
+    if not entry or now - float(entry.get("window_start") or 0) > window_seconds:
+        entry = {"window_start": now, "count": 0}
+    entry["count"] = int(entry["count"]) + 1
+    ip_rate_limit_fallback[key] = entry
+    if entry["count"] > max_attempts:
+        audit_log("rate_limited", None, {"scope": scope, "fallback": True})
+        raise HTTPException(status_code=429, detail="Muitas tentativas. Tente novamente mais tarde.")
 
 
 def set_auth_cookie(response: Response, token: str) -> None:
@@ -3110,6 +3199,7 @@ def health():
 @app.post("/api/auth/register", status_code=status.HTTP_201_CREATED)
 @limiter.limit("3 per 1 hour")
 def register(request: Request, response: Response, payload: RegisterPayload) -> dict:
+    enforce_ip_rate_limit(request, "register", max_attempts=3, window_seconds=3600)
     email = normalize_email(payload.email)
     name = clean_text(payload.name, "Nome", 100)
     validate_password_strength(payload.password)
@@ -3289,6 +3379,7 @@ async def upload_profile_photo(
     file: UploadFile = File(...),
     current_user: dict = Depends(get_current_user),
 ) -> dict:
+    enforce_ip_rate_limit(request, "avatar_upload", max_attempts=12, window_seconds=3600)
     content = await file.read(PROFILE_PHOTO_MAX_BYTES + 1)
     if not content:
         raise HTTPException(status_code=400, detail="Escolha uma imagem para enviar.")
@@ -3329,6 +3420,7 @@ def change_password(
     payload: ChangePasswordPayload,
     current_user: dict = Depends(get_current_user),
 ) -> dict:
+    enforce_ip_rate_limit(request, "change_password", max_attempts=3, window_seconds=3600)
     user = get_user_by_id(current_user["id"])
     if not user or not user.get("hashed_password") or not verify_password(payload.current_password, user["hashed_password"]):
         raise HTTPException(status_code=400, detail="Senha atual incorreta.")
@@ -3397,6 +3489,7 @@ def delete_account(
     Exige reautenticação por senha (contas com senha); as FKs ON DELETE CASCADE
     em user_id removem settings/categorias/transações/cartões/orçamentos/etc.
     """
+    enforce_ip_rate_limit(request, "delete_account", max_attempts=5, window_seconds=3600)
     user = get_user_by_id(current_user["id"])
     if user and user.get("hashed_password") and (
         not payload.password or not verify_password(payload.password, user["hashed_password"])
@@ -3420,6 +3513,7 @@ def delete_account(
 @limiter.limit("10 per 1 hour")
 def export_my_data(request: Request, current_user: dict = Depends(get_current_user)) -> Response:
     """LGPD Art. 18 — acesso e portabilidade: todos os dados do titular em JSON."""
+    enforce_ip_rate_limit(request, "privacy_export", max_attempts=10, window_seconds=3600)
     with db_cursor() as cursor:
         data = build_data_export(cursor, current_user["id"])
     body = json.dumps(jsonable_encoder(data), ensure_ascii=False, indent=2)
@@ -3531,7 +3625,14 @@ def transactions(
 
 
 @app.post("/api/imports/csv/upload")
-def upload_csv_import(file: UploadFile = File(...), current_user: dict = Depends(get_current_user)) -> dict:
+def upload_csv_import(
+    request: Request,
+    file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    # CSV-10: sem limite, um upload grava até 1 MB de JSONB por chamada em
+    # csv_import_sessions_state.
+    enforce_ip_rate_limit(request, "csv_upload", max_attempts=20, window_seconds=3600)
     cleanup_csv_import_sessions()
     filename = file.filename or ""
     content_type = (file.content_type or "").split(";")[0].strip().lower()
@@ -4242,6 +4343,7 @@ def get_export_transactions(user_id: str, month_key: str) -> list[dict]:
 @app.get("/api/export/csv")
 @limiter.limit("20 per 1 hour")
 def export_csv(request: Request, month: str | None = None, current_user: dict = Depends(get_current_user)) -> Response:
+    enforce_ip_rate_limit(request, "export_csv", max_attempts=20, window_seconds=3600)
     user_id = current_user["id"]
     month_key = validate_month_text(month) or get_current_month()
     rows = get_export_transactions(user_id, month_key)
@@ -4713,6 +4815,7 @@ def build_report_pdf(report: dict, rows: list[dict], generated_at: datetime) -> 
 @app.get("/api/export/pdf")
 @limiter.limit("20 per 1 hour")
 def export_pdf(request: Request, month: str | None = None, current_user: dict = Depends(get_current_user)) -> Response:
+    enforce_ip_rate_limit(request, "export_pdf", max_attempts=20, window_seconds=3600)
     user_id = current_user["id"]
     month_key = validate_month_text(month) or get_current_month()
     report = get_reports_summary(user_id, month_key)

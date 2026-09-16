@@ -118,6 +118,7 @@ async def clean_db(ensure_schema):
             DELETE FROM categories WHERE user_id IN (SELECT id FROM users WHERE email LIKE %s);
             DELETE FROM settings WHERE user_id IN (SELECT id FROM users WHERE email LIKE %s);
             DELETE FROM login_failures_state;
+            DELETE FROM rate_limit_state;
             DELETE FROM users WHERE email LIKE %s;
             """,
             ("%@example.test", "%@example.test", "%@example.test", "%@example.test", "%@example.test", "%@example.test"),
@@ -133,6 +134,7 @@ async def clean_db(ensure_schema):
             DELETE FROM categories WHERE user_id IN (SELECT id FROM users WHERE email LIKE %s);
             DELETE FROM settings WHERE user_id IN (SELECT id FROM users WHERE email LIKE %s);
             DELETE FROM login_failures_state;
+            DELETE FROM rate_limit_state;
             DELETE FROM users WHERE email LIKE %s;
             """,
             ("%@example.test", "%@example.test", "%@example.test", "%@example.test", "%@example.test", "%@example.test"),

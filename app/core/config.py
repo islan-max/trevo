@@ -24,6 +24,7 @@ class Settings:
     access_token_expire_hours: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_HOURS", "168"))
 
     allowed_origins_raw: str = os.getenv("ALLOWED_ORIGINS", "")
+    trusted_hosts_raw: str = os.getenv("TRUSTED_HOSTS", "")
 
     supabase_url: str = os.getenv("SUPABASE_URL", "")
     supabase_service_role_key: str = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
@@ -51,6 +52,23 @@ class Settings:
         if self.is_production:
             return []
         return ["http://localhost:8000", "http://127.0.0.1:8000", "http://localhost:3000"]
+
+    @property
+    def trusted_hosts(self) -> list[str]:
+        """Hosts aceitos no header ``Host`` (SEC-06).
+
+        Sem isto, ``app/oauth.py`` deriva o redirect do fluxo OAuth de
+        ``request.base_url`` — que vem direto do ``Host`` da requisição, sem
+        validação. Um ``Host`` forjado faz o servidor redirecionar para um
+        domínio arbitrário depois do login (open redirect).
+
+        Vazio por padrão: sem um valor configurado explicitamente não há como
+        saber os hosts legítimos de cada ambiente sem risco de derrubar
+        produção com um allowlist errado. Defina em produção com o(s)
+        domínio(s) público(s), separados por vírgula.
+        """
+        raw = os.getenv("TRUSTED_HOSTS", self.trusted_hosts_raw)
+        return [host.strip() for host in raw.split(",") if host.strip()]
 
     @property
     def supabase_configured(self) -> bool:
