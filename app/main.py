@@ -29,7 +29,7 @@ from fastapi.security import OAuth2PasswordBearer
 from fastapi.staticfiles import StaticFiles
 from jose import JWTError, jwt
 from psycopg2 import errors
-from psycopg2.extras import Json
+from psycopg2.extras import Json, execute_values
 from pydantic import BaseModel, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -556,19 +556,70 @@ def parse_import_type(raw_type: Any, amount: Decimal) -> Literal["income", "expe
     return "expense" if amount < 0 else "income"
 
 
+# CSV-05: só ";" e "," eram reconhecidos. Extratos de alguns bancos e
+# planilhas exportadas usam tabulação ou pipe.
+_CSV_DELIMITER_CANDIDATES = (";", ",", "\t", "|")
+
+
+def _count_delimiters(line: str) -> dict[str, int]:
+    return {delimiter: line.count(delimiter) for delimiter in _CSV_DELIMITER_CANDIDATES}
+
+
 def detect_csv_delimiter(sample: str) -> str:
     first_line = sample.splitlines()[0] if sample.splitlines() else ""
-    return ";" if first_line.count(";") >= first_line.count(",") else ","
+    counts = _count_delimiters(first_line)
+    best_delimiter = max(counts, key=lambda delimiter: counts[delimiter])
+    return best_delimiter if counts[best_delimiter] > 0 else ","
+
+
+def find_csv_header_line_index(lines: list[str]) -> int:
+    """Localiza a linha de cabeçalho real, pulando o preâmbulo que extratos
+    bancários costumam trazer antes da tabela (nome do banco, período,
+    agência) — CSV-04.
+
+    Heurística: a primeira linha cujo delimitador mais frequente também
+    aparece na próxima linha não vazia, com a MESMA contagem de campos.
+    Preâmbulo tipicamente não usa o delimitador do arquivo, ou usa em
+    quantidade diferente da linha de dados seguinte — a linha de cabeçalho
+    de verdade e a primeira linha de dados sempre têm o mesmo número de
+    colunas. Sem nenhuma linha assim, cai no comportamento antigo: a
+    primeira linha é o cabeçalho.
+    """
+    for index, line in enumerate(lines):
+        if not line.strip():
+            continue
+        counts = _count_delimiters(line)
+        delimiter, count = max(counts.items(), key=lambda item: item[1])
+        if count == 0:
+            continue
+        field_count = len(line.split(delimiter))
+        next_line = next((candidate for candidate in lines[index + 1 :] if candidate.strip()), None)
+        if next_line is not None and len(next_line.split(delimiter)) == field_count:
+            return index
+    return 0
 
 
 def parse_csv_rows(content: bytes) -> tuple[list[str], list[dict[str, str]]]:
-    try:
-        text = content.decode("utf-8-sig")
-    except UnicodeDecodeError:
+    text = None
+    # CSV-06: cp1252 antes do fallback final. latin-1 nunca levanta
+    # UnicodeDecodeError (mapeia todo byte para um caractere), o que fazia um
+    # arquivo Windows-1252 (aspas curvas, travessão) "funcionar" decodificado
+    # errado em vez de cair no encoding certo.
+    for encoding in ("utf-8-sig", "cp1252"):
+        try:
+            text = content.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:
         text = content.decode("latin-1")
 
-    delimiter = detect_csv_delimiter(text[:2048])
-    reader = csv.DictReader(io.StringIO(text), delimiter=delimiter)
+    lines = text.splitlines()
+    header_index = find_csv_header_line_index(lines)
+    delimiter = detect_csv_delimiter(lines[header_index] if lines else "")
+    table_text = "\n".join(lines[header_index:])
+
+    reader = csv.DictReader(io.StringIO(table_text), delimiter=delimiter)
     columns = [column.strip() for column in (reader.fieldnames or []) if column and column.strip()]
     if not columns:
         raise HTTPException(status_code=400, detail="CSV sem cabeçalho.")
@@ -577,7 +628,11 @@ def parse_csv_rows(content: bytes) -> tuple[list[str], list[dict[str, str]]]:
     for index, row in enumerate(reader, start=1):
         if index > CSV_IMPORT_MAX_ROWS:
             raise HTTPException(status_code=400, detail=f"CSV excede o limite de {CSV_IMPORT_MAX_ROWS} linhas.")
-        cleaned = {str(key or "").strip(): str(value or "").strip() for key, value in row.items() if key}
+        cleaned = {
+            str(key or "").strip(): unescape_csv_formula_guard(str(value or "").strip())
+            for key, value in row.items()
+            if key
+        }
         if any(cleaned.values()):
             rows.append(cleaned)
     if not rows:
@@ -590,6 +645,18 @@ def csv_safe_cell(value: Any) -> str:
     if text and text[0] in CSV_FORMULA_PREFIXES:
         return f"'{text}"
     return text
+
+
+def unescape_csv_formula_guard(value: str) -> str:
+    """Desfaz o apóstrofo de guarda de csv_safe_cell ao reimportar um CSV
+    exportado pelo próprio Trevo — sem isto, ele volta como caractere
+    literal na descrição (CSV-07). Só remove quando o caractere seguinte é
+    exatamente um dos gatilhos de fórmula, o mesmo critério que decide
+    adicioná-lo na exportação — não mexe num apóstrofo comum.
+    """
+    if len(value) >= 2 and value[0] == "'" and value[1] in CSV_FORMULA_PREFIXES:
+        return value[1:]
+    return value
 
 
 def serialize_value(value: Any) -> Any:
@@ -2231,8 +2298,7 @@ def _compute_budget_summary(user_id: str, month: str) -> dict:
     }
 
 
-def match_categorization_rule(user_id: str, description: str) -> dict | None:
-    normalized_description = normalize_duplicate_text(description)
+def list_categorization_rules(user_id: str) -> list[dict]:
     with db_cursor() as cursor:
         cursor.execute(
             """
@@ -2244,11 +2310,19 @@ def match_categorization_rule(user_id: str, description: str) -> dict | None:
             """,
             (user_id,),
         )
-        rules = normalize_rows(cursor.fetchall())
+        return normalize_rows(cursor.fetchall())
+
+
+def find_matching_rule(rules: list[dict], description: str) -> dict | None:
+    normalized_description = normalize_duplicate_text(description)
     for rule in rules:
         if normalize_duplicate_text(rule["pattern"]) in normalized_description:
             return rule
     return None
+
+
+def match_categorization_rule(user_id: str, description: str) -> dict | None:
+    return find_matching_rule(list_categorization_rules(user_id), description)
 
 
 def get_reports_summary(user_id: str, month: str) -> dict:
@@ -3051,21 +3125,28 @@ def cleanup_csv_import_sessions() -> None:
             csv_import_sessions.pop(token, None)
 
 
-def resolve_import_category(user_id: str, raw_name, description: str) -> tuple[int | None, str | None]:
+def resolve_import_category(
+    categories: list[dict], rules: list[dict], raw_name, description: str
+) -> tuple[int | None, str | None]:
     """Descobre a categoria de uma linha do extrato.
 
     Primeiro tenta o nome que veio no arquivo (casando por nome normalizado com
     as categorias do usuario); se nao houver coluna de categoria ou o nome nao
     casar, cai nas regras de categorizacao ja cadastradas.
+
+    PERF-01: recebe categorias e regras já carregadas em vez de consultar o
+    banco aqui dentro — chamada uma vez por LINHA do arquivo, isso fazia até
+    duas idas ao banco por linha (list_categories + match_categorization_rule),
+    até 10.000 no limite de 5.000 linhas.
     """
     name = str(raw_name or "").strip()
     if name:
         wanted = normalize_duplicate_text(name)
-        for category in list_categories(user_id):
+        for category in categories:
             if normalize_duplicate_text(str(category["name"])) == wanted:
                 return int(category["id"]), str(category["name"])
 
-    rule = match_categorization_rule(user_id, description)
+    rule = find_matching_rule(rules, description)
     if rule:
         return int(rule["category_id"]), rule.get("category_name")
     return None, name or None
@@ -3073,6 +3154,12 @@ def resolve_import_category(user_id: str, raw_name, description: str) -> tuple[i
 
 def build_csv_import_preview(user_id: str, session: dict, mapping: CsvColumnMapping) -> dict:
     validate_csv_mapping(session["columns"], mapping)
+
+    # PERF-01: categorias e regras carregadas UMA VEZ por importação, não uma
+    # vez por linha do arquivo — resolve_import_category fazia até duas idas
+    # ao banco por linha, até 10.000 no limite de 5.000 linhas.
+    categories = list_categories(user_id)
+    rules = list_categorization_rules(user_id)
 
     parsed_rows: list[dict] = []
     errors_list: list[dict] = []
@@ -3089,13 +3176,25 @@ def build_csv_import_preview(user_id: str, session: dict, mapping: CsvColumnMapp
             if amount <= 0:
                 raise ValueError("Valor precisa ser maior que zero.")
             category_id, category_name = resolve_import_category(
-                user_id, row.get(mapping.category) if mapping.category else None, description
+                categories, rules, row.get(mapping.category) if mapping.category else None, description
             )
             account = (
                 clean_text(row.get(mapping.account, ""), "Conta", 120, required=False) if mapping.account else None
             )
             year, month_number, day = (int(part) for part in transaction_date.split("-"))
-            duplicate_hash = build_duplicate_hash(user_id, transaction_date, description, amount, transaction_type)
+            # FIN-01: o hash mais novo inclui hora e conta quando existem —
+            # sem isso, duas transações legítimas e distintas no mesmo dia
+            # (duas passagens de ônibus, mesma descrição e valor, hora
+            # diferente) produziam o mesmo hash e uma era descartada como
+            # duplicata. Os dois formatos antigos continuam sendo consultados
+            # para não quebrar a deduplicação de lançamentos já importados
+            # antes desta mudança.
+            duplicate_hash = build_duplicate_hash(
+                user_id, transaction_date, description, amount, transaction_type, time=parsed_time, account=account
+            )
+            type_aware_duplicate_hash = build_duplicate_hash(
+                user_id, transaction_date, description, amount, transaction_type
+            )
             legacy_duplicate_hash = build_duplicate_hash(user_id, transaction_date, description, amount)
             parsed_rows.append(
                 {
@@ -3115,6 +3214,7 @@ def build_csv_import_preview(user_id: str, session: dict, mapping: CsvColumnMapp
                     "categoryName": category_name,
                     "account": account,
                     "duplicateHash": duplicate_hash,
+                    "typeAwareDuplicateHash": type_aware_duplicate_hash,
                     "legacyDuplicateHash": legacy_duplicate_hash,
                 }
             )
@@ -3122,12 +3222,17 @@ def build_csv_import_preview(user_id: str, session: dict, mapping: CsvColumnMapp
             detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
             errors_list.append({"line": index, "detail": detail})
 
+    existing_hashes: set[str] = set()
     if parsed_rows:
         duplicate_hashes = sorted(
             {
                 candidate
                 for row in parsed_rows
-                for candidate in (row["duplicateHash"], row.get("legacyDuplicateHash"))
+                for candidate in (
+                    row["duplicateHash"],
+                    row.get("typeAwareDuplicateHash"),
+                    row.get("legacyDuplicateHash"),
+                )
                 if candidate
             }
         )
@@ -3144,7 +3249,9 @@ def build_csv_import_preview(user_id: str, session: dict, mapping: CsvColumnMapp
         duplicate_rows = [
             row
             for row in parsed_rows
-            if row["duplicateHash"] in existing_hashes or row.get("legacyDuplicateHash") in existing_hashes
+            if row["duplicateHash"] in existing_hashes
+            or row.get("typeAwareDuplicateHash") in existing_hashes
+            or row.get("legacyDuplicateHash") in existing_hashes
         ]
 
     # Ordem cronologica (e por hora, quando existe) para o preview refletir o
@@ -3723,8 +3830,6 @@ def confirm_csv_import(payload: CsvImportConfirmPayload, current_user: dict = De
     session = get_csv_import_session(user_id, payload.importToken)
     preview = build_csv_import_preview(user_id, session, payload.mapping)
 
-    imported: list[dict] = []
-    duplicates: list[dict] = []
     replaced = 0
     months = [entry["month"] for entry in preview["months"]]
     # Identifica este lote — usado para rastrear quais lançamentos vieram
@@ -3754,55 +3859,104 @@ def confirm_csv_import(payload: CsvImportConfirmPayload, current_user: dict = De
             replaced = cursor.rowcount or 0
             audit_log("csv_import_replace", user_id, {"months": months, "deleted": replaced})
 
-        for row in preview["rows"]:
-            # Em "replace" os meses já foram limpos, então o único choque
-            # possível é dentro do próprio arquivo (duas linhas idênticas).
+        # Duplicatas contra o estado ATUAL do banco — pós-delete, se "replace"
+        # rodou acima. Uma única consulta em lote (não uma por linha —
+        # PERF-01), recalculada aqui (não reaproveitada do preview) porque em
+        # modo "replace" o preview foi calculado ANTES do DELETE: usar o
+        # resultado dele aqui trataria como "duplicata" uma linha cujo
+        # correspondente acabou de ser apagado.
+        all_candidate_hashes = sorted(
+            {
+                candidate
+                for row in preview["rows"]
+                for candidate in (
+                    row["duplicateHash"],
+                    row.get("typeAwareDuplicateHash"),
+                    row.get("legacyDuplicateHash"),
+                )
+                if candidate
+            }
+        )
+        existing_hashes: set[str] = set()
+        if all_candidate_hashes:
             cursor.execute(
-                """
-                SELECT id
-                FROM transactions
-                WHERE user_id = %s AND duplicate_hash = ANY(%s)
-                LIMIT 1
-                """,
-                (
-                    user_id,
-                    [candidate for candidate in (row["duplicateHash"], row.get("legacyDuplicateHash")) if candidate],
-                ),
+                "SELECT duplicate_hash FROM transactions WHERE user_id = %s AND duplicate_hash = ANY(%s)",
+                (user_id, all_candidate_hashes),
             )
-            if cursor.fetchone():
-                duplicates.append(row)
-                continue
+            existing_hashes = {row["duplicate_hash"] for row in normalize_rows(cursor.fetchall())}
 
-            category_id = row.get("categoryId")
-            payment_method = row.get("account") or "csv_import"
-            notes = f"Importado às {row['time']}" if row.get("time") else ""
-            cursor.execute(
+        candidate_rows = []
+        duplicates: list[dict] = []
+        for row in preview["rows"]:
+            if (
+                row["duplicateHash"] in existing_hashes
+                or row.get("typeAwareDuplicateHash") in existing_hashes
+                or row.get("legacyDuplicateHash") in existing_hashes
+            ):
+                duplicates.append(row)
+            else:
+                candidate_rows.append(row)
+
+        # PERF-01: era um SELECT de duplicata + um INSERT por linha (até
+        # 5.000 idas ao banco cada, em serverless cada uma abrindo conexão
+        # própria). ON CONFLICT DO NOTHING fica como cinto e suspensório
+        # contra duas linhas idênticas dentro do próprio arquivo (Postgres
+        # descarta conflitos dentro do mesmo INSERT também), usando o índice
+        # único que já existe. RETURNING * devolve só as linhas que entraram
+        # de fato.
+        #
+        # CSV-08/09: payment_method deixa de receber a conta (que polui o
+        # paymentMethodBreakdown do dashboard com nomes de conta em vez de
+        # forma de pagamento) — vai para a coluna account, dedicada.
+        # external_id deixa de receber o duplicate_hash (era um bug: os dois
+        # campos têm propósitos diferentes).
+        values = [
+            (
+                user_id,
+                row["title"],
+                row["amount"],
+                row["type"],
+                row.get("categoryId"),
+                "csv_import",
+                row["transactionDate"],
+                f"Importado às {row['time']}" if row.get("time") else "",
+                row["detectedMonth"],
+                row["duplicateHash"],
+                row["rawDescription"],
+                import_batch_id,
+                row.get("account"),
+            )
+            for row in candidate_rows
+        ]
+
+        imported: list[dict] = []
+        if values:
+            inserted_rows = execute_values(
+                cursor,
                 """
                 INSERT INTO transactions
-                  (user_id, title, amount, type, category_id, payment_method, transaction_date, notes, card_id,
-                   billing_month, installment_group, installment_number, total_installments, source, external_id,
-                   imported_at, raw_description, duplicate_hash, import_batch_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NULL, %s, NULL, NULL, NULL,
-                        'csv_import', %s, NOW(), %s, %s, %s)
+                  (user_id, title, amount, type, category_id, payment_method, transaction_date, notes,
+                   billing_month, duplicate_hash, raw_description, import_batch_id, account,
+                   card_id, installment_group, installment_number, total_installments, source, external_id,
+                   imported_at)
+                VALUES %s
+                ON CONFLICT (user_id, duplicate_hash) WHERE duplicate_hash IS NOT NULL DO NOTHING
                 RETURNING *
                 """,
-                (
-                    user_id,
-                    row["title"],
-                    row["amount"],
-                    row["type"],
-                    category_id,
-                    payment_method[:50],
-                    row["transactionDate"],
-                    notes,
-                    row["detectedMonth"],
-                    row["duplicateHash"],
-                    row["rawDescription"],
-                    row["duplicateHash"],
-                    import_batch_id,
+                values,
+                template=(
+                    "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,"
+                    " NULL, NULL, NULL, NULL, 'csv_import', NULL, NOW())"
                 ),
+                fetch=True,
             )
-            imported.append(require_row(normalize_row(cursor.fetchone()), "Lançamento importado não criado."))
+            imported = normalize_rows(inserted_rows)
+
+        # Alguma linha ainda pode ter sido descartada pelo ON CONFLICT (duas
+        # linhas idênticas dentro do próprio arquivo) — conta como duplicata
+        # também.
+        inserted_hashes = {row["duplicate_hash"] for row in imported}
+        duplicates.extend(row for row in candidate_rows if row["duplicateHash"] not in inserted_hashes)
 
     csv_import_sessions.pop(payload.importToken, None)
     if storage_available():

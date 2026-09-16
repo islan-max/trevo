@@ -47,6 +47,7 @@ export type Transaction = {
   installment_number?: number | null;
   total_installments?: number | null;
   source: DataSource;
+  account?: string | null;
 };
 
 export type Card = {
