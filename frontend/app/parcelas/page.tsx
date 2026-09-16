@@ -105,9 +105,15 @@ export default function ParcelasPage() {
   async function deleteInstallmentPurchase(installment: FutureInstallment) {
     if (!token) return;
     if (!window.confirm(`Excluir "${installment.title}"? Todas as parcelas dessa compra serao removidas.`)) return;
-    await api.deleteTransaction(token, installment.id);
-    setMessage("Compra parcelada excluida.");
-    await loadFutureInstallments();
+    try {
+      // Esta tela já avisa que o grupo inteiro sai junto — scope=group
+      // confirma isso para a API, que agora recusa (409) sem essa marca.
+      await api.deleteTransaction(token, installment.id, "group");
+      setMessage("Compra parcelada excluida.");
+      await loadFutureInstallments();
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Falha ao excluir.");
+    }
   }
 
   return (

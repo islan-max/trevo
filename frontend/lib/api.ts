@@ -368,8 +368,11 @@ export const api = {
   }>) {
     return request<Transaction>(`/api/transactions/${id}`, { method: "PUT", token, body: JSON.stringify(payload) });
   },
-  deleteTransaction(token: string, id: number) {
-    return request<{ deleted?: boolean; deletedGroup?: boolean }>(`/api/transactions/${id}`, { method: "DELETE", token });
+  deleteTransaction(token: string, id: number, scope: "single" | "group" = "single") {
+    return request<{ deleted?: boolean; deletedGroup?: boolean }>(withQuery(`/api/transactions/${id}`, { scope }), {
+      method: "DELETE",
+      token
+    });
   },
   budgets(token: string, month: string) {
     return request<BudgetSummary>(withQuery("/api/budgets", { month }), { token });

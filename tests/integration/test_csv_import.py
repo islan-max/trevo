@@ -128,6 +128,98 @@ async def test_csv_import_detects_legacy_duplicate_hashes(client, auth_headers):
 
 
 @pytest.mark.asyncio
+async def test_csv_replace_mode_preserves_manual_and_installment_transactions(client, auth_headers):
+    """DATA-01: 'substituir' apaga só o que veio de CSV, nunca lançamentos
+    manuais nem parcelas de cartão que caiam no mesmo mês do arquivo."""
+    manual = await client.post(
+        "/api/transactions",
+        headers=auth_headers,
+        json={
+            "title": "Aluguel",
+            "amount": 1800,
+            "type": "expense",
+            "paymentMethod": "pix",
+            "transactionDate": "2024-05-15",
+        },
+    )
+    assert manual.status_code == 200, manual.text
+    manual_id = manual.json()["id"]
+
+    card_response = await client.post(
+        "/api/cards",
+        headers=auth_headers,
+        json={
+            "name": "Cartão",
+            "brand": "Visa",
+            "lastFour": "1234",
+            "creditLimit": 5000,
+            "closingDay": 20,
+            "dueDay": 28,
+            "color": "#171717",
+        },
+    )
+    assert card_response.status_code == 200, card_response.text
+    card_id = card_response.json()["id"]
+    installments_response = await client.post(
+        f"/api/cards/{card_id}/installments",
+        headers=auth_headers,
+        json={
+            "title": "Geladeira",
+            "totalAmount": 1200,
+            "totalInstallments": 3,
+            "purchaseDate": "2024-05-05",
+        },
+    )
+    assert installments_response.status_code == 200, installments_response.text
+    installment_id = installments_response.json()["rows"][0]["id"]
+
+    upload_response = await client.post(
+        "/api/imports/csv/upload",
+        headers=auth_headers,
+        files={"file": ("extrato.csv", CSV_CONTENT.encode("utf-8"), "text/csv")},
+    )
+    assert upload_response.status_code == 200, upload_response.text
+    payload = {
+        "importToken": upload_response.json()["importToken"],
+        "mapping": {"date": "data", "description": "descricao", "value": "valor", "type": "tipo"},
+        "mode": "replace",
+    }
+    confirm_response = await client.post("/api/imports/csv/confirm", headers=auth_headers, json=payload)
+    assert confirm_response.status_code == 200, confirm_response.text
+    assert confirm_response.json()["imported"] == 2
+    assert confirm_response.json()["replaced"] == 0
+
+    remaining = await client.get("/api/transactions", headers=auth_headers, params={"month": "2024-05"})
+    remaining_ids = {row["id"] for row in remaining.json()}
+    assert manual_id in remaining_ids
+    assert installment_id in remaining_ids
+
+
+@pytest.mark.asyncio
+async def test_csv_replace_mode_still_removes_previous_csv_import_same_month(client, auth_headers):
+    """O modo 'substituir' continua substituindo importações anteriores —
+    a correção de DATA-01 só protege o que NÃO veio de CSV."""
+    first = await upload_preview_confirm(client, auth_headers)
+    assert first["imported"] == 2
+
+    upload_response = await client.post(
+        "/api/imports/csv/upload",
+        headers=auth_headers,
+        files={"file": ("extrato.csv", CSV_CONTENT.encode("utf-8"), "text/csv")},
+    )
+    assert upload_response.status_code == 200, upload_response.text
+    payload = {
+        "importToken": upload_response.json()["importToken"],
+        "mapping": {"date": "data", "description": "descricao", "value": "valor", "type": "tipo"},
+        "mode": "replace",
+    }
+    confirm_response = await client.post("/api/imports/csv/confirm", headers=auth_headers, json=payload)
+    assert confirm_response.status_code == 200, confirm_response.text
+    assert confirm_response.json()["replaced"] == 2
+    assert confirm_response.json()["imported"] == 2
+
+
+@pytest.mark.asyncio
 async def test_csv_import_rejects_wrong_extension(client, auth_headers):
     response = await client.post(
         "/api/imports/csv/upload",
