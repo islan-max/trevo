@@ -94,20 +94,28 @@ def resolve_avatar_url(ref: str | None) -> str | None:
     return ref
 
 
-def remove_avatar(ref: str | None) -> None:
-    """Best-effort removal of a stored avatar (used on replace and on erasure)."""
+def remove_avatar(ref: str | None) -> bool:
+    """Best-effort removal of a stored avatar (used on replace and on erasure).
+
+    Returns True on success (or when there's nothing to remove), False when
+    removal was attempted and failed. SEC-11: the caller — not this function
+    — decides what to do with a failure; on account deletion, it means the
+    LGPD erasure is incomplete and needs to be tracked, not silently dropped.
+    """
     if not ref or _is_external(ref):
-        return
+        return True
     try:
         if ref.startswith(SUPABASE_REF_PREFIX):
             path = ref[len(SUPABASE_REF_PREFIX):]
             bucket = settings.effective_avatars_bucket
             _supabase_client().storage.from_(bucket).remove([path])
-            return
+            return True
         if ref.startswith(PROFILE_PHOTO_URL_PREFIX):
             filename = ref.rsplit("/", 1)[-1]
             target = (PROFILE_PHOTO_DIR / filename).resolve()
             if target.parent == PROFILE_PHOTO_DIR.resolve() and target.exists():
                 target.unlink()
+        return True
     except Exception:
         logger.exception("Failed to remove avatar")
+        return False

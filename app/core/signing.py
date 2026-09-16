@@ -19,6 +19,8 @@ import logging
 import os
 import secrets
 
+from app.core.config import settings
+
 logger = logging.getLogger("trevo.signing")
 
 JWT_SECRET_NAME = "jwt_secret_key"
@@ -76,8 +78,34 @@ def resolve_jwt_secret() -> str:
             "JWT_SECRET_KEY não está definida e o segredo não pôde ser provisionado no banco."
         ) from exc
 
-    logger.info("Segredo de assinatura carregado da tabela app_secrets")
+    if settings.is_production:
+        # SEC-05: o segredo fica em texto claro em app_secrets. Quem lê essa
+        # tabela (dump, snapshot, painel do Supabase, service-role key
+        # vazada) consegue forjar uma sessão para QUALQUER usuário — um
+        # vetor mais amplo que o de leitura de dados comuns, e sem rotação
+        # possível sem derrubar todas as sessões ativas de uma vez.
+        logger.warning(
+            "JWT_SECRET_KEY não está definida em produção — assinando com um segredo "
+            "gerado e guardado em app_secrets (SEC-05). Defina JWT_SECRET_KEY assim que possível."
+        )
+    else:
+        logger.info("Segredo de assinatura carregado da tabela app_secrets")
     return _cached_secret
+
+
+def secret_source() -> str:
+    """Informa a origem do segredo de assinatura sem provisionar nada.
+
+    Usado por GET /api/health para tornar o estado do SEC-05 visível em
+    qualquer ambiente (inclusive serverless, onde validate_runtime_config
+    não roda). 'env' | 'database' | 'unresolved' (ainda não calculado neste
+    processo — só acontece antes do primeiro token assinado/verificado).
+    """
+    if os.getenv("JWT_SECRET_KEY", "").strip():
+        return "env"
+    if _cached_secret:
+        return "database"
+    return "unresolved"
 
 
 def reset_cache() -> None:

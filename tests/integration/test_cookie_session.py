@@ -9,8 +9,13 @@ caminho de produção nunca era exercitado. Ver TEST-01 na auditoria técnica.
 
 from __future__ import annotations
 
-import pytest
+from datetime import UTC, datetime, timedelta
 
+import pytest
+from jose import jwt
+
+from app.core.config import settings
+from app.core.signing import resolve_jwt_secret
 from tests.conftest import TEST_DB_URL, csrf_headers, register_user
 
 pytestmark = pytest.mark.skipif(not TEST_DB_URL, reason="TEST_DATABASE_URL is not configured")
@@ -80,3 +85,43 @@ async def test_cookie_csrf_endpoint_issues_token_for_authenticated_session(cooki
 
     assert response.status_code == 200, response.text
     assert response.json()["csrf_token"]
+
+
+@pytest.mark.asyncio
+async def test_cookie_session_renews_when_close_to_expiry(cookie_client):
+    """SEC-07: sessão de uso contínuo nunca deveria chegar perto de expirar —
+    get_current_user reemite o cookie quando falta menos de 25% da validade."""
+    await register_user(cookie_client)
+    total_hours = settings.access_token_expire_hours
+
+    now = datetime.now(UTC)
+    remaining_hours = total_hours * 0.1  # bem abaixo do limiar de 25%
+    issued_at = now - timedelta(hours=total_hours - remaining_hours)
+    expires_at = issued_at + timedelta(hours=total_hours)
+    me_before = await cookie_client.get("/api/auth/me")
+    user_id = me_before.json()["id"]
+
+    near_expiry_token = jwt.encode(
+        {"sub": user_id, "iat": int(issued_at.timestamp()), "exp": int(expires_at.timestamp())},
+        resolve_jwt_secret(),
+        algorithm="HS256",
+    )
+    cookie_client.cookies.set("trevo_access_token", near_expiry_token)
+
+    response = await cookie_client.get("/api/auth/me")
+
+    assert response.status_code == 200, response.text
+    assert cookie_client.cookies.get("trevo_access_token") != near_expiry_token
+
+
+@pytest.mark.asyncio
+async def test_cookie_session_does_not_renew_far_from_expiry(cookie_client):
+    """Contraste com o teste acima: sessão recém-emitida não é reemitida a
+    cada request — só perto do fim da validade."""
+    await register_user(cookie_client)
+
+    token_after_login = cookie_client.cookies.get("trevo_access_token")
+    response = await cookie_client.get("/api/auth/me")
+
+    assert response.status_code == 200, response.text
+    assert cookie_client.cookies.get("trevo_access_token") == token_after_login

@@ -60,7 +60,7 @@ from app.core.security import (
     verify_password,
     verify_pin,
 )
-from app.core.signing import resolve_jwt_secret
+from app.core.signing import resolve_jwt_secret, secret_source
 from app.integrations.normalizer import (
     build_duplicate_hash,
     normalize_duplicate_text,
@@ -279,7 +279,7 @@ app.add_middleware(
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials="*" not in ALLOWED_ORIGINS,
     allow_methods=["*"],
-    allow_headers=["Authorization", "Content-Type", "X-Card-Unlock-Token"],
+    allow_headers=["Authorization", "Content-Type", "X-Card-Unlock-Token", "X-Token-Response"],
 )
 # SEC-06: app/oauth.py deriva o redirect do fluxo OAuth de request.base_url,
 # que vem do header Host sem validação — um Host forjado produz um redirect
@@ -964,6 +964,20 @@ def set_auth_cookie(response: Response, token: str) -> None:
     issue_csrf_cookie(response)
 
 
+def token_response_body(request: Request, token: str) -> dict:
+    """Corpo de resposta de login/registro (SEC-12).
+
+    O cookie já foi setado por set_auth_cookie — o SPA nunca lê este campo,
+    só o cookie. Devolver o token no corpo mesmo assim faz ele trafegar (e
+    ser logado por proxies/DevTools) sem necessidade. Clientes de API que
+    dependem de Bearer continuam recebendo o token normalmente; o SPA sinaliza
+    que só precisa do cookie com o header X-Token-Response: omit.
+    """
+    if request.headers.get("x-token-response") == "omit":
+        return {"token_type": "bearer"}  # nosec B105
+    return {"access_token": token, "token_type": "bearer"}  # nosec B105
+
+
 def clear_auth_cookie(response: Response) -> None:
     response.delete_cookie(AUTH_COOKIE_NAME, path="/", samesite="lax", secure=is_production())
     response.delete_cookie(CSRF_COOKIE_NAME, path="/", samesite="lax", secure=is_production())
@@ -1040,6 +1054,9 @@ def public_user(user: dict) -> dict:
         "is_active": bool(user["is_active"]),
         "created_at": user.get("created_at"),
         "updated_at": user.get("updated_at"),
+        # Exposto para o perfil mostrar qual provedor social já está
+        # vinculado à conta — nunca sensível, é o próprio usuário lendo.
+        "auth_provider": user.get("auth_provider"),
     }
 
 
@@ -1109,6 +1126,20 @@ def resolve_oauth_user(profile: dict[str, str]) -> dict:
             by_email.get("auth_provider") != provider or str(by_email.get("oauth_subject")) != subject
         ):
             raise HTTPException(status_code=409, detail="E-mail já vinculado a outro provedor social.")
+        if by_email.get("hashed_password") and not by_email.get("oauth_subject"):
+            # SEC-04: a conta tem senha própria e nunca foi vinculada a
+            # nenhum provedor social — vincular automaticamente aqui
+            # transferiria a segurança dela inteiramente para a política de
+            # verificação de e-mail do provedor OAuth, sem confirmação do
+            # dono da conta. A vinculação intencional passa por
+            # /api/auth/oauth/{provider}/authorize?link=true, autenticado.
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Já existe uma conta com este e-mail. Entre com sua senha e "
+                    "vincule o login social pelo seu perfil."
+                ),
+            )
         with db_cursor(commit=True) as cursor:
             cursor.execute(
                 """
@@ -1170,6 +1201,7 @@ def ensure_user_defaults(user_id: str) -> None:
 
 
 def get_current_user(
+    response: Response,
     token: str | None = Depends(oauth2_scheme),
     cookie_token: str | None = Cookie(default=None, alias=AUTH_COOKIE_NAME),
 ) -> dict:
@@ -1178,6 +1210,10 @@ def get_current_user(
         detail="Token inv\u00e1lido ou expirado.",
         headers={"WWW-Authenticate": "Bearer"},
     )
+    # SEC-07: s\u00f3 renova quando a autentica\u00e7\u00e3o veio do cookie (Bearer \u00e9
+    # expl\u00edcito \u2014 o cliente de API controla o pr\u00f3prio ciclo de vida do
+    # token, e n\u00e3o haveria onde escrever um Set-Cookie de qualquer forma).
+    used_cookie = token is None and cookie_token is not None
     token = token or cookie_token
     if not token:
         raise credentials_error
@@ -1190,6 +1226,7 @@ def get_current_user(
             raise credentials_error
         user_uuid = UUID(str(subject))
         issued_at_claim = payload.get("iat")
+        expires_at_claim = payload.get("exp")
     except (JWTError, ValueError):
         raise credentials_error from None
 
@@ -1203,7 +1240,62 @@ def get_current_user(
         issued_at = datetime.fromtimestamp(float(issued_at_claim), UTC)
         if issued_at < password_changed_at:
             raise credentials_error
+
+    if used_cookie and isinstance(expires_at_claim, (int, float)):
+        # Renova\u00e7\u00e3o deslizante: reemite o cookie quando falta menos de 25% da
+        # validade. Uso cont\u00ednuo nunca deixa a sess\u00e3o chegar perto de
+        # expirar; parada, expira em at\u00e9 ACCESS_TOKEN_EXPIRE_HOURS ap\u00f3s o
+        # \u00faltimo request. N\u00e3o revoga o token antigo \u2014 ele j\u00e1 vale at\u00e9 o
+        # pr\u00f3prio exp original, e revogar aqui derrubaria outras abas com o
+        # cookie ainda n\u00e3o atualizado (Set-Cookie n\u00e3o \u00e9 instant\u00e2neo entre
+        # abas).
+        total_seconds = ACCESS_TOKEN_EXPIRE_HOURS * 3600
+        remaining_seconds = expires_at_claim - datetime.now(UTC).timestamp()
+        if total_seconds > 0 and remaining_seconds < total_seconds * 0.25:
+            set_auth_cookie(response, create_access_token(user["id"]))
+
     return public_user(user)
+
+
+def get_optional_current_user(
+    response: Response,
+    token: str | None = Depends(oauth2_scheme),
+    cookie_token: str | None = Cookie(default=None, alias=AUTH_COOKIE_NAME),
+) -> dict | None:
+    """Como get_current_user, mas devolve None em vez de 401 sem sessão.
+
+    Usado por rotas que precisam se comportar diferente se a requisição já
+    está autenticada, sem tornar a autenticação obrigatória — o link OAuth
+    (?link=true) exige sessão; o authorize normal não.
+    """
+    try:
+        return get_current_user(response, token=token, cookie_token=cookie_token)
+    except HTTPException:
+        return None
+
+
+def link_oauth_identity_to_user(user_id: str, profile: dict[str, str]) -> None:
+    """Vincula um provedor social à conta JÁ AUTENTICADA que iniciou o pedido.
+
+    Ao contrário de resolve_oauth_user (usado no login), esta função nunca
+    decide por conta própria a QUEM vincular — o usuário já está
+    identificado pela sessão que abriu o fluxo (ver oauth_authorize com
+    link=true), fechando o ponto de SEC-04.
+    """
+    provider = profile["provider"]
+    subject = profile["subject"]
+    existing = get_user_by_oauth(provider, subject)
+    if existing and str(existing["id"]) != str(user_id):
+        raise HTTPException(status_code=409, detail="Esta conta social já está vinculada a outro usuário.")
+    try:
+        with db_cursor(commit=True) as cursor:
+            cursor.execute(
+                "UPDATE users SET auth_provider = %s, oauth_subject = %s WHERE id = %s",
+                (provider, subject, user_id),
+            )
+    except errors.UniqueViolation:
+        raise HTTPException(status_code=409, detail="Esta conta social já está vinculada a outro usuário.") from None
+    audit_log("oauth_linked", user_id, {"provider": provider})
 
 
 def get_settings(user_id: str) -> dict:
@@ -3319,6 +3411,11 @@ def health():
             "checks": {
                 "database": {"status": "ok", "latency_ms": latency_ms},
                 "migrations": {"status": "ok"},
+                # SEC-05: 'database' significa que JWT_SECRET_KEY não está
+                # definida e o servidor está assinando sessões com um
+                # segredo gerado e guardado em app_secrets — nunca expõe o
+                # valor, só a origem.
+                "signing": {"source": secret_source()},
             },
         }
     except Exception:
@@ -3332,6 +3429,7 @@ def health():
                 "checks": {
                     "database": {"status": "error", "latency_ms": None},
                     "migrations": {"status": "unknown"},
+                    "signing": {"source": secret_source()},
                 },
             },
             status_code=503,
@@ -3370,7 +3468,7 @@ def register(request: Request, response: Response, payload: RegisterPayload) -> 
     audit_log("user_registered", str(user["id"]), {"email_hash": email_hash(email)})
     token = create_access_token(user["id"])
     set_auth_cookie(response, token)
-    return {"access_token": token, "token_type": "bearer"}  # nosec B105
+    return token_response_body(request, token)
 
 
 @app.get("/api/auth/oauth/providers")
@@ -3380,11 +3478,26 @@ def oauth_providers(request: Request) -> dict:
 
 
 @app.get("/api/auth/oauth/{provider}/authorize")
-def oauth_authorize(provider: str, request: Request) -> RedirectResponse:
+def oauth_authorize(
+    provider: str,
+    request: Request,
+    link: bool = False,
+    current_user: dict | None = Depends(get_optional_current_user),
+) -> RedirectResponse:
     if provider not in OAUTH_PROVIDERS:
         raise HTTPException(status_code=404, detail="Provedor OAuth não suportado.")
     set_request_origin(str(request.base_url))
-    return build_authorize_redirect(provider)
+    link_user_id = None
+    if link:
+        # SEC-04: vincular uma conta social exige que o dono já esteja
+        # autenticado por senha — sem isso, qualquer um poderia "vincular"
+        # a própria conta social à conta de outra pessoa sem confirmação.
+        if not current_user:
+            raise HTTPException(
+                status_code=401, detail="Entre com sua senha antes de vincular uma conta social."
+            )
+        link_user_id = str(current_user["id"])
+    return build_authorize_redirect(provider, link_user_id=link_user_id)
 
 
 @app.get("/api/auth/oauth/{provider}/callback")
@@ -3399,8 +3512,10 @@ def oauth_callback(
 ) -> RedirectResponse:
     set_request_origin(str(request.base_url))
 
-    def redirect_and_clear(*, access_token: str | None = None, error_message: str | None = None) -> RedirectResponse:
-        response = frontend_redirect(access_token=access_token, error=error_message)
+    def redirect_and_clear(
+        *, access_token: str | None = None, error_message: str | None = None, link_success: bool = False
+    ) -> RedirectResponse:
+        response = frontend_redirect(access_token=access_token, error=error_message, link_success=link_success)
         response.delete_cookie(OAUTH_STATE_COOKIE, path="/api/auth/oauth")
         return response
 
@@ -3412,7 +3527,11 @@ def oauth_callback(
     if not code or not state:
         return redirect_and_clear(error_message="missing_code")
     try:
-        profile = fetch_oauth_profile(provider, code, state, oauth_state_cookie)
+        profile, state_payload = fetch_oauth_profile(provider, code, state, oauth_state_cookie)
+        link_user_id = state_payload.get("link_user_id")
+        if link_user_id:
+            link_oauth_identity_to_user(link_user_id, profile)
+            return redirect_and_clear(link_success=True)
         user = resolve_oauth_user(profile)
         audit_log("login_success_oauth", str(user["id"]), {"provider": provider, "email_hash": email_hash(user["email"])})
         token = create_access_token(user["id"])
@@ -3452,7 +3571,7 @@ def login(
     audit_log("login_success", str(user["id"]), {"email_hash": email_hash(email_value)})
     token = create_access_token(user["id"])
     set_auth_cookie(response, token)
-    return {"access_token": token, "token_type": "bearer"}  # nosec B105
+    return token_response_body(request, token)
 
 
 @app.get("/api/auth/me")
@@ -3639,10 +3758,25 @@ def delete_account(
         raise HTTPException(status_code=400, detail="Senha incorreta.")
 
     avatar_ref = user.get("avatar_url") if user else None
+    deleted_user_id = current_user["id"]
     with db_cursor(commit=True) as cursor:
-        cursor.execute("DELETE FROM users WHERE id = %s", (current_user["id"],))
+        cursor.execute("DELETE FROM users WHERE id = %s", (deleted_user_id,))
 
-    storage.remove_avatar(avatar_ref)
+    if avatar_ref and not storage.remove_avatar(avatar_ref):
+        # SEC-11: a conta já foi apagada; sem isto, a falha desaparecia e a
+        # eliminação LGPD ficava incompleta sem ninguém saber. Best-effort
+        # também aqui — se ATÉ o registro da pendência falhar, loga e segue
+        # (a exclusão da conta em si não pode travar por causa do avatar).
+        try:
+            with db_cursor(commit=True) as cursor:
+                cursor.execute(
+                    "INSERT INTO pending_avatar_deletions (user_id, avatar_ref) VALUES (%s, %s)",
+                    (deleted_user_id, avatar_ref),
+                )
+        except Exception:
+            logger.exception("Failed to record pending avatar deletion for user_id=%s", deleted_user_id)
+        audit_log("avatar_deletion_failed", deleted_user_id, {"avatar_ref": avatar_ref})
+
     active_token = token or cookie_token
     if active_token:
         revoke_token(active_token, current_user["id"])
@@ -3670,7 +3804,10 @@ def export_my_data(request: Request, current_user: dict = Depends(get_current_us
 @app.post("/api/privacy/consent")
 def update_consent(
     request: Request,
+    response: Response,
     payload: ConsentPayload,
+    token: str | None = Depends(oauth2_scheme),
+    cookie_token: str | None = Cookie(default=None, alias=AUTH_COOKIE_NAME),
     current_user: dict = Depends(get_current_user),
 ) -> dict:
     """Registra concessão/revogação de consentimento (Arts. 7/8).
@@ -3682,6 +3819,7 @@ def update_consent(
     if payload.scope not in allowed_scopes:
         raise HTTPException(status_code=400, detail="Escopo de consentimento inválido.")
 
+    deactivated = False
     ip_hash = client_ip_hash(request)
     with db_cursor(commit=True) as cursor:
         record_consent(
@@ -3697,7 +3835,28 @@ def update_consent(
                 "UPDATE users SET send_monthly_summary = %s WHERE id = %s",
                 (payload.granted, current_user["id"]),
             )
-    return {"scope": payload.scope, "granted": payload.granted, "policy_version": POLICY_VERSION}
+        elif payload.scope == "terms_privacy" and not payload.granted:
+            # SEC-09: revogar o consentimento que sustenta o próprio serviço
+            # não pode ser um no-op — antes, a conta continuava plenamente
+            # ativa depois de "revogada". Desativa a conta (reversível,
+            # diferente de excluir) em vez de apagar dados sem a confirmação
+            # por senha que DELETE /api/auth/me exige.
+            cursor.execute("UPDATE users SET is_active = FALSE WHERE id = %s", (current_user["id"],))
+            deactivated = True
+
+    if deactivated:
+        active_token = token or cookie_token
+        if active_token:
+            revoke_token(active_token, current_user["id"])
+        clear_auth_cookie(response)
+        audit_log("account_deactivated_consent_revoked", current_user["id"])
+
+    return {
+        "scope": payload.scope,
+        "granted": payload.granted,
+        "policy_version": POLICY_VERSION,
+        "accountDeactivated": deactivated,
+    }
 
 
 @app.get("/api/bootstrap")

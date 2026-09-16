@@ -214,13 +214,18 @@ def list_providers() -> dict[str, dict[str, bool]]:
     return payload
 
 
-def create_oauth_state(provider: str) -> str:
+def create_oauth_state(provider: str, link_user_id: str | None = None) -> str:
     """Stateless, signed OAuth state.
 
     The provider and expiry are carried inside a signed token (no server-side
     storage), so authorize and callback can be served by different serverless
     invocations. The same value is mirrored in an HttpOnly cookie for CSRF
     (double-submit) protection.
+
+    ``link_user_id``, when present, marks this authorization as a request to
+    link the provider to an ALREADY authenticated account (SEC-04) rather
+    than a login — the callback branches on it instead of resolving/creating
+    a user by e-mail.
     """
     now = int(time.time())
     payload = {
@@ -229,10 +234,12 @@ def create_oauth_state(provider: str) -> str:
         "exp": now + OAUTH_STATE_TTL_SECONDS,
         "nonce": secrets.token_urlsafe(16),
     }
+    if link_user_id:
+        payload["link_user_id"] = link_user_id
     return jwt.encode(payload, resolve_jwt_secret(), algorithm=OAUTH_STATE_ALG)
 
 
-def consume_oauth_state(state: str, provider: str, cookie_state: str | None) -> None:
+def consume_oauth_state(state: str, provider: str, cookie_state: str | None) -> dict:
     # Double-submit: the state in the URL must match the one in the cookie.
     if not cookie_state or not secrets.compare_digest(state, cookie_state):
         raise HTTPException(status_code=400, detail="State OAuth inválido ou expirado.")
@@ -242,13 +249,14 @@ def consume_oauth_state(state: str, provider: str, cookie_state: str | None) -> 
         raise HTTPException(status_code=400, detail="State OAuth inválido ou expirado.") from None
     if payload.get("provider") != provider:
         raise HTTPException(status_code=400, detail="State OAuth inválido ou expirado.")
+    return payload
 
 
-def build_authorize_redirect(provider: str) -> RedirectResponse:
+def build_authorize_redirect(provider: str, link_user_id: str | None = None) -> RedirectResponse:
     config = provider_config(provider)
     if not config or not oauth_redirect_base():
         raise HTTPException(status_code=503, detail=f"Login com {provider} indisponível no momento.")
-    state = create_oauth_state(provider)
+    state = create_oauth_state(provider, link_user_id=link_user_id)
     params = {
         "client_id": config.client_id,
         "redirect_uri": provider_callback_url(provider),
@@ -291,8 +299,15 @@ def exchange_code_for_token(config: OAuthProviderConfig, code: str) -> str:
     return str(access_token)
 
 
-def fetch_oauth_profile(provider: str, code: str, state: str, cookie_state: str | None) -> dict[str, str]:
-    consume_oauth_state(state, provider, cookie_state)
+def fetch_oauth_profile(provider: str, code: str, state: str, cookie_state: str | None) -> tuple[dict[str, str], dict]:
+    """Troca o code pelo perfil OAuth e devolve, junto, o payload do state.
+
+    O payload carrega ``link_user_id`` quando esta autorização começou como
+    um pedido de vínculo (ver create_oauth_state) — o callback usa isso para
+    decidir entre logar/criar um usuário ou vincular o provedor à conta já
+    autenticada que iniciou o fluxo.
+    """
+    state_payload = consume_oauth_state(state, provider, cookie_state)
     config = provider_config(provider)
     if not config:
         raise HTTPException(status_code=503, detail=f"Login com {provider} indisponível.")
@@ -301,11 +316,15 @@ def fetch_oauth_profile(provider: str, code: str, state: str, cookie_state: str 
     if not profile.get("subject"):
         raise HTTPException(status_code=400, detail="Identidade OAuth inválida.")
     profile["provider"] = provider
-    return profile
+    return profile, state_payload
 
 
-def frontend_redirect(access_token: str | None = None, error: str | None = None) -> RedirectResponse:
+def frontend_redirect(
+    access_token: str | None = None, error: str | None = None, link_success: bool = False
+) -> RedirectResponse:
     base = oauth_frontend_callback_url()
+    if link_success:
+        return RedirectResponse(f"{base}?linked=1", status_code=302)
     if access_token:
         return RedirectResponse(f"{base}?session=1", status_code=302)
     query = urlencode({"error": error or "oauth_failed"})

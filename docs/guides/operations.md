@@ -72,6 +72,17 @@ Token invalido:
 - Peça para o usuario sair e entrar novamente.
 - Em multiplos workers, use Redis para compartilhar a blocklist de tokens revogados.
 
+Avatar orfao apos exclusao de conta (SEC-11):
+- `storage.remove_avatar()` e melhor-esforco; se falhar durante
+  `DELETE /api/auth/me`, a conta ja foi apagada e a falha fica registrada em
+  `pending_avatar_deletions` (sem FK para `users`, de proposito — o usuario
+  ja nao existe).
+- Verificar pendencias: `SELECT * FROM pending_avatar_deletions WHERE resolved_at IS NULL ORDER BY failed_at;`
+- Para cada linha, remover manualmente o objeto (`avatar_ref` comeca com
+  `supabase://` para o bucket privado, ou `/media/profile-photos/` para
+  disco local) e marcar como resolvido:
+  `UPDATE pending_avatar_deletions SET resolved_at = NOW() WHERE id = %s;`
+
 ## Monitoramento
 
 Monitore `GET /api/health`. SLA sugerido: 99,5% mensal para o app e latencia de health check abaixo de 500 ms em condicoes normais.

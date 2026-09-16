@@ -185,10 +185,18 @@ export const api = {
   oauthAuthorizeUrl(provider: OAuthProviderKey) {
     return `${API_BASE_URL}/api/auth/oauth/${provider}/authorize`;
   },
+  oauthLinkUrl(provider: OAuthProviderKey) {
+    // Navegação de página inteira (não fetch): o cookie de sessão viaja
+    // junto normalmente, o que autentica o link do lado do servidor.
+    return `${API_BASE_URL}/api/auth/oauth/${provider}/authorize?link=true`;
+  },
   register(payload: { name: string; email: string; password: string; acceptTerms: boolean }) {
     const { acceptTerms, ...rest } = payload;
-    return request<{ access_token: string; token_type: string }>("/api/auth/register", {
+    // X-Token-Response: omit (SEC-12) — o SPA usa só o cookie que a própria
+    // resposta já seta; sem isso o token trafega no corpo sem necessidade.
+    return request<{ access_token?: string; token_type: string }>("/api/auth/register", {
       method: "POST",
+      headers: { "X-Token-Response": "omit" },
       body: JSON.stringify({ ...rest, accept_terms: acceptTerms })
     });
   },
@@ -211,10 +219,11 @@ export const api = {
   },
   login(email: string, password: string) {
     const body = new URLSearchParams({ email, password });
-    return request<{ access_token: string; token_type: string }>("/api/auth/login", {
+    // X-Token-Response: omit (SEC-12) — ver register() acima.
+    return request<{ access_token?: string; token_type: string }>("/api/auth/login", {
       method: "POST",
       body,
-      headers: { "Content-Type": "application/x-www-form-urlencoded" }
+      headers: { "Content-Type": "application/x-www-form-urlencoded", "X-Token-Response": "omit" }
     });
   },
   me(token: string) {

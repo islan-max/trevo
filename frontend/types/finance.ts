@@ -10,6 +10,7 @@ export type User = {
   avatar_url?: string | null;
   send_monthly_summary: boolean;
   is_active: boolean;
+  auth_provider?: string | null;
 };
 
 export type Settings = {
