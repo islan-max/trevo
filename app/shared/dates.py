@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
+
+from app.shared.clock import current_month as _current_month
 
 
 def pad(value: int) -> str:
@@ -26,7 +28,9 @@ def format_month_label(month_key: str) -> str:
 
 
 def get_current_month() -> str:
-    return datetime.now(UTC).strftime("%Y-%m")
+    # DOM-04: antes usava datetime.now(UTC) diretamente — o mês contábil
+    # trocava até 3h antes da virada real em America/Sao_Paulo (UTC-3).
+    return _current_month()
 
 
 def get_month_range(month_key: str) -> tuple[str, str]:

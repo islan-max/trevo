@@ -4,7 +4,8 @@ from decimal import Decimal
 
 import pytest
 
-from app.main import add_months, build_duplicate_hash, get_month_range, parse_decimal_text, parse_import_date, parse_import_type
+from app.main import add_months, build_duplicate_hash, parse_decimal_text, parse_import_date, parse_import_type
+from app.shared.dates import get_month_range
 
 
 def test_add_months_forward_and_backward():
