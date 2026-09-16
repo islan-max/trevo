@@ -67,6 +67,95 @@ async def test_user_daily_goal_stays_separate_from_recommended_goal(client, auth
 
 
 @pytest.mark.asyncio
+async def test_effective_income_does_not_double_count_income_transaction(client, auth_headers):
+    """DOM-05: settings.monthly_income somado a inflow (soma das entradas do
+    mês) sem checar se já eram a mesma coisa dobrava o orçamento disponível
+    quando o usuário lançava o salário como transação — o gesto natural.
+    get_effective_income usa o maior entre os dois, não a soma."""
+    settings_response = await client.post(
+        "/api/settings",
+        headers=auth_headers,
+        json={"monthlyIncome": 3000, "dailyGoal": 0, "reserveAmount": 0},
+    )
+    assert settings_response.status_code == 200, settings_response.text
+
+    salary_response = await client.post(
+        "/api/transactions",
+        headers=auth_headers,
+        json={
+            "title": "Salário",
+            "amount": 3000,
+            "type": "income",
+            "paymentMethod": "pix",
+            "transactionDate": "2024-05-05",
+        },
+    )
+    assert salary_response.status_code == 200, salary_response.text
+
+    goals_response = await client.get("/api/goals?month=2024-05", headers=auth_headers)
+    assert goals_response.status_code == 200, goals_response.text
+    # Sem a correção: available_budget = 3000 (configurado) + 3000
+    # (lançado) = 6000.
+    assert goals_response.json()["availableBudget"] == 3000
+
+    bootstrap_response = await client.get("/api/bootstrap?month=2024-05", headers=auth_headers)
+    assert bootstrap_response.status_code == 200, bootstrap_response.text
+    assert bootstrap_response.json()["dashboard"]["balance"] == 3000
+
+    # Em um mês sem nada lançado, cai para o valor configurado — não some.
+    other_month_response = await client.get("/api/goals?month=2024-06", headers=auth_headers)
+    assert other_month_response.status_code == 200, other_month_response.text
+    assert other_month_response.json()["availableBudget"] == 3000
+
+
+@pytest.mark.asyncio
+async def test_goals_daily_calendar_matches_month_total_for_billed_installments(client, auth_headers):
+    """FIN-02: a série diária do calendário filtrava por transaction_date
+    BETWEEN, enquanto o total do mês filtra pelo mês efetivo (billing_month).
+    Uma parcela comprada em agosto e faturada em setembro entrava no total
+    de setembro mas sumia das barras diárias."""
+    card_response = await client.post(
+        "/api/cards",
+        headers=auth_headers,
+        json={
+            "name": "Cartão",
+            "brand": "Visa",
+            "lastFour": "1234",
+            "creditLimit": 5000,
+            "closingDay": 20,
+            "dueDay": 28,
+            "color": "#171717",
+        },
+    )
+    assert card_response.status_code == 200, card_response.text
+    card_id = card_response.json()["id"]
+
+    installments_response = await client.post(
+        f"/api/cards/{card_id}/installments",
+        headers=auth_headers,
+        json={
+            "title": "Compra parcelada",
+            "totalAmount": 200,
+            "totalInstallments": 2,
+            "purchaseDate": "2026-08-25",  # depois do fechamento (dia 20)
+        },
+    )
+    assert installments_response.status_code == 200, installments_response.text
+    rows = installments_response.json()["rows"]
+    first_installment = next(row for row in rows if row["installment_number"] == 1)
+    assert first_installment["billing_month"] == "2026-09"
+    assert first_installment["transaction_date"] == "2026-08-25"
+
+    goals_response = await client.get("/api/goals?month=2026-09", headers=auth_headers)
+    assert goals_response.status_code == 200, goals_response.text
+    goals = goals_response.json()
+
+    days_sum = sum(day["spent"] for day in goals["days"])
+    assert days_sum == goals["totalOutflow"]
+    assert days_sum > 0
+
+
+@pytest.mark.asyncio
 async def test_cards_return_commitment_grouped_installments_and_purchase_simulation(client, auth_headers):
     category_response = await client.post(
         "/api/categories",

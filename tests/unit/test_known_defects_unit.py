@@ -6,6 +6,8 @@ Cada teste aqui é `xfail(strict=True)`: falha hoje pelo motivo descrito, e
 defeito, em vez de deixá-lo esquecido como falso-verde permanente.
 
 Ver docs/auditoria-2026-09.md para o achado completo de cada ID.
+
+DOM-04 foi corrigido no BP-03 e seu teste promovido para test_clock.py.
 """
 
 from __future__ import annotations
@@ -13,10 +15,8 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
-from freezegun import freeze_time
 
 from app.integrations.normalizer import parse_decimal_text
-from app.shared.dates import get_current_month
 
 
 @pytest.mark.xfail(
@@ -42,17 +42,3 @@ def test_parse_decimal_text_detects_en_us_thousands_separator():
 )
 def test_parse_decimal_text_recognizes_parentheses_as_negative():
     assert parse_decimal_text("(123,45)") == Decimal("-123.45")
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "DOM-04: get_current_month() usa datetime.now(UTC). Às 23h30 de "
-        "30/09 em America/Sao_Paulo (UTC-3) já são 02h30 de 01/10 em UTC, "
-        "então o mês contábil troca 3 horas antes da virada real no Brasil."
-    ),
-)
-def test_current_month_respects_brazil_timezone_not_utc():
-    # 30/09/2026 23:30 em America/Sao_Paulo == 01/10/2026 02:30 em UTC.
-    with freeze_time("2026-10-01 02:30:00"):
-        assert get_current_month() == "2026-09"

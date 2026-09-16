@@ -9,10 +9,10 @@ from app.main import (
     add_months,
     distribute_installments,
     format_brl,
-    get_month_range,
     round_money,
     to_decimal,
 )
+from app.shared.dates import get_month_range
 
 
 def test_format_brl():

@@ -80,15 +80,16 @@ from app.privacy.service import (
     build_data_export,
     record_consent,
 )
+from app.shared import clock
 from app.shared.dates import (
     add_months,
     first_billing_month,
     format_month_label,
     get_current_month,
-    get_month_range,
     month_key_from_date,
 )
 from app.shared.money import (
+    apply_installment_interest,
     distribute_installments,
     format_brl,
     round_money,
@@ -1154,6 +1155,27 @@ def get_settings(user_id: str) -> dict:
     return row
 
 
+def get_effective_income(user_settings: dict, inflow: Any) -> Decimal:
+    """Renda efetiva do m\u00eas: o maior entre a renda configurada e o que j\u00e1
+    entrou em lan\u00e7amentos de receita.
+
+    Antes, get_dashboard, _compute_goals e calculate_score somavam
+    monthly_income (renda configurada em Configura\u00e7\u00f5es) a inflow (soma de
+    TODAS as transa\u00e7\u00f5es de tipo income do m\u00eas) sem checar se eram a mesma
+    coisa. Quem lan\u00e7a o sal\u00e1rio como transa\u00e7\u00e3o de entrada \u2014 o gesto natural,
+    e a categoria padr\u00e3o "Sal\u00e1rio" existe exatamente para isso \u2014 tinha a
+    renda contada duas vezes: or\u00e7amento dispon\u00edvel e meta di\u00e1ria dobravam, o
+    Ritmo Score inflava e os alertas de estouro paravam de disparar (DOM-05).
+
+    monthly_income passa a ser tratado como renda ESPERADA: se o que j\u00e1
+    entrou no m\u00eas cobre ou supera esse valor, usa o que entrou; caso
+    contr\u00e1rio usa o configurado (para quem ainda n\u00e3o lan\u00e7ou a renda do m\u00eas
+    corrente, ou lan\u00e7a s\u00f3 parte dela como transa\u00e7\u00e3o).
+    """
+    monthly_income = round_money(user_settings.get("monthly_income") or 0)
+    return max(monthly_income, round_money(inflow))
+
+
 def list_categories(user_id: str) -> list[dict]:
     with db_cursor() as cursor:
         cursor.execute(
@@ -1892,12 +1914,16 @@ def get_dashboard(user_id: str, month: str) -> dict:
     outflow = round_money(totals["outflow"])
     base_income = round_money(user_settings["monthly_income"] or 0)
     reserve_amount = round_money(user_settings.get("reserve_amount") or 0)
-    balance = round_money(base_income + inflow - outflow)
+    # DOM-05: balance e o percentual comprometido usam a renda EFETIVA (o
+    # maior entre configurada e o que já entrou), não a soma das duas — ver
+    # get_effective_income.
+    effective_income = get_effective_income(user_settings, inflow)
+    balance = round_money(effective_income - outflow)
     goals = get_goals(user_id, month)
     previous_inflow = round_money(previous_totals["inflow"])
     previous_outflow = round_money(previous_totals["outflow"])
-    previous_balance = round_money(base_income + previous_inflow - previous_outflow)
-    salary_base = base_income + inflow
+    previous_balance = round_money(get_effective_income(user_settings, previous_inflow) - previous_outflow)
+    salary_base = effective_income
     committed_percent = (
         int(((outflow + reserve_amount) / salary_base * Decimal("100")).to_integral_value(rounding=ROUND_HALF_UP))
         if salary_base > 0
@@ -1944,13 +1970,14 @@ def get_goals(user_id: str, month: str) -> dict:
 
 def _compute_goals(user_id: str, month: str) -> dict:
     user_settings = get_settings(user_id)
-    start, end = get_month_range(month)
     year, month_num = [int(part) for part in month.split("-")]
 
     from calendar import monthrange
 
     total_days = monthrange(year, month_num)[1]
-    today = datetime.now(UTC).date()
+    # DOM-04: "hoje" e "mês atual" do ponto de vista do usuário, não de UTC —
+    # ver app/shared/clock.py.
+    today = clock.today()
     current_month = today.strftime("%Y-%m")
     if month < current_month:
         progress_day = total_days
@@ -1969,11 +1996,10 @@ def _compute_goals(user_id: str, month: str) -> dict:
               COALESCE(SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END), 0) AS expense
             FROM transactions
             WHERE user_id = %s
-              AND transaction_date BETWEEN %s AND %s
-              AND (billing_month IS NULL OR billing_month = %s)
+              AND COALESCE(billing_month, substring(transaction_date from 1 for 7)) = %s
             GROUP BY day
             """,
-            (user_id, start, end, month),
+            (user_id, month),
         )
         rows = normalize_rows(cursor.fetchall())
         cursor.execute(
@@ -2001,21 +2027,27 @@ def _compute_goals(user_id: str, month: str) -> dict:
         )
         current_outflow_row = require_row(normalize_row(cursor.fetchone()), "Gasto atual não encontrado.")
 
-    day_map = {
-        int(row["day"]): {
-            "income": round_money(row["income"]),
-            "expense": round_money(row["expense"]),
-        }
-        for row in rows
-    }
+    # FIN-02: uma parcela ou compra pós-fechamento pode ter transaction_date
+    # em um mês diferente do billing_month (a fatura em que ela cai). O dia de
+    # origem às vezes nem existe no mês exibido (dia 31 comprado em agosto,
+    # faturado em setembro, que tem 30 dias) — concentra no último dia em vez
+    # de descartar, para o somatório do calendário nunca divergir do total do
+    # mês exibido em outro lugar da tela.
+    day_map: dict[int, dict[str, Decimal]] = {}
+    for row in rows:
+        day_number = min(int(row["day"]), total_days)
+        bucket = day_map.setdefault(day_number, {"income": Decimal("0"), "expense": Decimal("0")})
+        bucket["income"] = round_money(bucket["income"] + round_money(row["income"]))
+        bucket["expense"] = round_money(bucket["expense"] + round_money(row["expense"]))
     days: list[dict] = []
     legacy_daily_goal = round_money(user_settings["daily_goal"])
     reserve_amount = round_money(user_settings.get("reserve_amount") or 0)
-    monthly_income = round_money(user_settings["monthly_income"] or 0)
     inflow = round_money(totals["inflow"])
     outflow = round_money(totals["outflow"])
     outflow_to_today = round_money(current_outflow_row["outflow"])
-    available_budget = round_money(monthly_income + inflow - reserve_amount)
+    # DOM-05: renda efetiva (o maior entre configurada e o que já entrou),
+    # não a soma das duas — ver get_effective_income.
+    available_budget = round_money(get_effective_income(user_settings, inflow) - reserve_amount)
     recommended_daily_goal = round_money(available_budget / Decimal(total_days)) if available_budget > 0 else Decimal("0.00")
     target_daily_goal = legacy_daily_goal if legacy_daily_goal > 0 else recommended_daily_goal
     # A média fica sem arredondar para projetar; arredondar antes de multiplicar
@@ -2387,7 +2419,9 @@ def calculate_score(user_id: str, month: str) -> dict:
     base = 1000
     breakdown = {"gastos": 0, "consistência": 0, "reservas": 0, "cartões": 0, "orçamento": 0}
 
-    denominator = monthly_income + inflow
+    # DOM-05: renda efetiva (o maior entre configurada e o que já entrou),
+    # não a soma das duas — ver get_effective_income.
+    denominator = get_effective_income(user_settings, inflow)
     ratio_gastos = (outflow / denominator) if denominator > 0 else (Decimal("1") if outflow > 0 else Decimal("0"))
     if ratio_gastos > Decimal("0.9"):
         breakdown["gastos"] = -200
@@ -2459,7 +2493,6 @@ def calculate_score(user_id: str, month: str) -> dict:
 
 def get_alerts_for_month(user_id: str, month: str) -> list[dict]:
     user_settings = get_settings(user_id)
-    monthly_income = round_money(user_settings["monthly_income"] or 0)
     totals = get_month_totals(user_id, month)
     alerts: list[dict] = []
 
@@ -2554,7 +2587,9 @@ def get_alerts_for_month(user_id: str, month: str) -> list[dict]:
             }
         )
 
-    projected_balance = monthly_income + totals["inflow"] - totals["outflow"]
+    # DOM-05: renda efetiva (o maior entre configurada e o que já entrou),
+    # não a soma das duas — ver get_effective_income.
+    projected_balance = get_effective_income(user_settings, totals["inflow"]) - totals["outflow"]
     if projected_balance < 0:
         alerts.append(
             {
@@ -4201,6 +4236,21 @@ def create_transaction(payload: TransactionPayload, current_user: dict = Depends
     notes = clean_text(payload.notes, "Observa\u00e7\u00f5es", 1000, required=False)
     transaction_date = validate_date_text(payload.transactionDate, "Data")
     billing_month = validate_month_text(payload.billingMonth)
+    if payload.cardId and not billing_month:
+        # DOM-03: sem isto, uma compra avulsa no cartão feita depois do
+        # fechamento caía na fatura do mês da compra em vez da seguinte —
+        # o mesmo cálculo que create_installments já faz para parceladas.
+        # Card inexistente é deixado para a FK violation abaixo (mesmo
+        # comportamento de erro que já existia); aqui só ajusta o mês
+        # quando o cartão é encontrado.
+        with db_cursor() as cursor:
+            cursor.execute(
+                "SELECT closing_day FROM cards WHERE user_id = %s AND id = %s",
+                (user_id, payload.cardId),
+            )
+            card_row = normalize_row(cursor.fetchone())
+        if card_row:
+            billing_month = first_billing_month(transaction_date, card_row.get("closing_day"))
     is_recurring, recurrence_type, recurrence_day = normalize_recurrence(
         payload.isRecurring,
         payload.recurrenceType,
@@ -4284,6 +4334,28 @@ def update_transaction(
     card_id = payload.cardId if "cardId" in fields_set else current["card_id"]
     billing_month = validate_month_text(payload.billingMonth) if "billingMonth" in fields_set else current["billing_month"]
 
+    if current["installment_group"]:
+        # FIN-09: mudar type, valor ou mês de fatura de UMA parcela quebra a
+        # integridade do grupo inteiro — a soma deixa de bater com o total
+        # parcelado, e o mês de cobrança sai da sequência esperada. Título,
+        # categoria, forma de pagamento e notas continuam livres.
+        if transaction_type != current["type"]:
+            raise HTTPException(status_code=409, detail="Não é possível alterar o tipo de uma parcela isoladamente.")
+        if amount != round_money(current["amount"]):
+            raise HTTPException(status_code=409, detail="Não é possível alterar o valor de uma parcela isoladamente.")
+        if billing_month != current["billing_month"]:
+            raise HTTPException(
+                status_code=409, detail="Não é possível alterar o mês de fatura de uma parcela isoladamente."
+            )
+
+    # FIN-09: um lançamento importado editado (título, valor, data ou tipo)
+    # deixava o duplicate_hash obsoleto — a próxima importação do mesmo
+    # extrato reintroduziria a transação, já que o hash guardado não batia
+    # mais com o conteúdo atual da linha.
+    duplicate_hash = current.get("duplicate_hash")
+    if current.get("source") == "csv_import":
+        duplicate_hash = build_duplicate_hash(user_id, transaction_date, title, amount, transaction_type)
+
     try:
         with db_cursor(commit=True) as cursor:
             cursor.execute(
@@ -4297,7 +4369,8 @@ def update_transaction(
                     transaction_date = %s,
                     notes = %s,
                     card_id = %s,
-                    billing_month = %s
+                    billing_month = %s,
+                    duplicate_hash = %s
                 WHERE user_id = %s AND id = %s
                 RETURNING *
                 """,
@@ -4311,6 +4384,7 @@ def update_transaction(
                     notes,
                     card_id,
                     billing_month,
+                    duplicate_hash,
                     user_id,
                     transaction_id,
                 ),
@@ -4318,6 +4392,12 @@ def update_transaction(
             row = require_row(normalize_row(cursor.fetchone()), "Lançamento não atualizado.")
     except errors.ForeignKeyViolation:
         raise HTTPException(status_code=400, detail="Categoria ou cartão inválido.") from None
+    except errors.UniqueViolation:
+        # O duplicate_hash recalculado (source = csv_import) pode colidir com
+        # outra transação já existente se a edição a tornar idêntica a ela.
+        raise HTTPException(
+            status_code=409, detail="Já existe um lançamento idêntico (mesma data, descrição e valor)."
+        ) from None
 
     return row
 
@@ -4739,7 +4819,7 @@ def build_report_pdf(report: dict, rows: list[dict], generated_at: datetime) -> 
     pdf.text(
         pdf.width - 198,
         54,
-        f"Gerado em: {generated_at.strftime('%d/%m/%Y %H:%M UTC')}",
+        f"Gerado em: {generated_at.strftime('%d/%m/%Y %H:%M')}",
         size=9,
         color="#DDE7F0",
     )
@@ -4857,7 +4937,10 @@ def export_pdf(request: Request, month: str | None = None, current_user: dict = 
         "Pragma": "no-cache",
     }
     return Response(
-        content=build_report_pdf(report, rows, datetime.now(UTC)),
+        # DOM-04: horário local de exibição, não UTC — "Gerado em" perto da
+        # meia-noite mostrava um dia adiantado para quem lê em horário do
+        # Brasil.
+        content=build_report_pdf(report, rows, clock.now()),
         media_type="application/pdf",
         headers=headers,
     )
@@ -5039,16 +5122,15 @@ def simulate_installments(
     purchase_date = validate_date_text(payload.purchaseDate, "Data da compra")
     base_month = month_key_from_date(purchase_date)
     
+    # DOM-02: apply_installment_interest nunca arredonda a taxa para
+    # centavos antes de aplicá-la (round_money(Decimal(rate)/100) fazia
+    # 0,4% a.m. virar 0,00% e os juros sumirem).
     try:
-        installment_amounts = distribute_installments(payload.totalAmount, payload.totalInstallments)
+        installment_amounts = apply_installment_interest(
+            payload.totalAmount, payload.totalInstallments, payload.interestRate
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    
-    # Aplicar juros se fornecido
-    if payload.interestRate > 0:
-        interest_rate = round_money(Decimal(payload.interestRate) / Decimal("100"))
-        total_with_interest = round_money(payload.totalAmount * (Decimal("1") + interest_rate * Decimal(payload.totalInstallments) / Decimal("2")))
-        installment_amounts = distribute_installments(total_with_interest, payload.totalInstallments)
     
     simulated_by_month = {
         add_months(base_month, index): amount for index, amount in enumerate(installment_amounts)
@@ -5085,16 +5167,15 @@ def create_installments_without_card(
     purchase_date = validate_date_text(payload.purchaseDate, "Data da compra")
     base_month = month_key_from_date(purchase_date)
     
+    # DOM-02: apply_installment_interest nunca arredonda a taxa para
+    # centavos antes de aplicá-la (round_money(Decimal(rate)/100) fazia
+    # 0,4% a.m. virar 0,00% e os juros sumirem).
     try:
-        installment_amounts = distribute_installments(payload.totalAmount, payload.totalInstallments)
+        installment_amounts = apply_installment_interest(
+            payload.totalAmount, payload.totalInstallments, payload.interestRate
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    
-    # Aplicar juros se fornecido
-    if payload.interestRate > 0:
-        interest_rate = round_money(Decimal(payload.interestRate) / Decimal("100"))
-        total_with_interest = round_money(payload.totalAmount * (Decimal("1") + interest_rate * Decimal(payload.totalInstallments) / Decimal("2")))
-        installment_amounts = distribute_installments(total_with_interest, payload.totalInstallments)
     
     try:
         with db_cursor(commit=True) as cursor:
