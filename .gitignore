@@ -50,6 +50,11 @@ artifacts/
 *.csv
 *.docx
 !docs/examples/**/*.csv
+# Fixtures de teste (extratos bancários sintéticos) precisam ser versionadas —
+# sem esta negação, *.csv acima as engoliria em silêncio, exatamente a classe
+# de incidente que scripts/check-ignored-files.sh existe para prevenir.
+!tests/fixtures/**/*.csv
+!tests/fixtures/**/*.pdf
 
 # OS
 .DS_Store

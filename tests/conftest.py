@@ -74,6 +74,33 @@ async def client(test_app):
         yield async_client
 
 
+@pytest_asyncio.fixture
+async def cookie_client(test_app):
+    """Cliente autenticado por cookie HttpOnly + CSRF double-submit.
+
+    É o caminho que a produção realmente usa (o SPA nunca manda Bearer). Ao
+    contrário de `client` (escopo de sessão, para não recriar o app a cada
+    teste), este é por-teste: httpx guarda cookies automaticamente no cliente,
+    e um jar compartilhado entre testes vazaria sessão de um teste para o
+    outro — um teste que espera 401 por estar deslogado passaria por engano se
+    herdasse o cookie de autenticação de um teste anterior.
+    """
+    transport = ASGITransport(app=test_app)
+    async with AsyncClient(transport=transport, base_url="http://test") as async_client:
+        yield async_client
+
+
+def csrf_headers(client: AsyncClient) -> dict[str, str]:
+    """Extrai o token do cookie `trevo_csrf` já presente no client (double-submit).
+
+    Chame depois de um login/registro bem-sucedido em `cookie_client` — a
+    resposta de `set_auth_cookie` sempre emite esse cookie junto.
+    """
+    token = client.cookies.get("trevo_csrf")
+    assert token, "Cookie trevo_csrf ausente — o cliente autenticou pelo caminho certo?"
+    return {"X-CSRF-Token": token}
+
+
 @pytest_asyncio.fixture(autouse=True)
 async def clean_db(ensure_schema):
     if not TEST_DB_URL:

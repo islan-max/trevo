@@ -11,10 +11,18 @@
 
 set -euo pipefail
 
-DIRS=("${@:-app frontend/app frontend/components frontend/lib migrations scripts tests}")
+if [ "$#" -gt 0 ]; then
+  DIRS=("$@")
+else
+  DIRS=(app frontend/app frontend/components frontend/lib migrations scripts tests)
+fi
 FOUND=0
 
-for dir in ${DIRS[@]}; do
+# csv/pdf entram porque são os formatos dos dois recursos centrais do produto
+# (importação e relatórios) e o .gitignore os ignora por padrão para não
+# versionar exportações geradas — a mesma regra que engoliria uma fixture de
+# teste sem avisar.
+for dir in "${DIRS[@]}"; do
   [ -d "$dir" ] || continue
   while IFS= read -r file; do
     [ -n "$file" ] || continue
@@ -24,7 +32,7 @@ for dir in ${DIRS[@]}; do
     esac
     echo "  $file"
     FOUND=1
-  done < <(git ls-files --others --ignored --exclude-standard -- "$dir" 2>/dev/null | grep -E '\.(py|ts|tsx|sql|css)$' || true)
+  done < <(git ls-files --others --ignored --exclude-standard -- "$dir" 2>/dev/null | grep -E '\.(py|ts|tsx|sql|css|csv|pdf|json|mjs|mts|yml|yaml)$' || true)
 done
 
 if [ "$FOUND" -eq 1 ]; then
