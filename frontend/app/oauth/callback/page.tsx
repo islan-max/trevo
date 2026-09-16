@@ -16,7 +16,16 @@ function OAuthCallbackContent() {
     const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
     const token = searchParams.get("access_token") || hashParams.get("access_token");
     const hasCookieSession = searchParams.get("session") === "1";
+    const linked = searchParams.get("linked") === "1";
     const error = searchParams.get("error");
+
+    if (linked) {
+      // Vínculo de conta social feito a partir de uma sessão já autenticada
+      // (perfil) — volta para lá em vez de /dashboard.
+      window.history.replaceState(null, "", "/oauth/callback");
+      router.replace("/perfil?linked=1");
+      return;
+    }
 
     if (token || hasCookieSession) {
       rememberSession();

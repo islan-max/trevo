@@ -9,7 +9,7 @@ import { KpiCard } from "@/components/KpiCard";
 import { PageHeader } from "@/components/PageHeader";
 import { SectionIntro } from "@/components/SectionIntro";
 import { Shell } from "@/components/Shell";
-import { api, apiAssetUrl } from "@/lib/api";
+import { api, apiAssetUrl, type OAuthProviderKey, type OAuthProvidersResponse } from "@/lib/api";
 import { COOKIE_AUTH_TOKEN, clearSession } from "@/lib/authSession";
 import { formatBRL } from "@/lib/format";
 import { useAuthToken } from "@/lib/useAuthToken";
@@ -21,6 +21,12 @@ type ProfileForm = {
 
 const PHOTO_MAX_BYTES = 512 * 1024;
 const PHOTO_TYPES = ["image/jpeg", "image/png", "image/webp"];
+
+const OAUTH_PROVIDER_LABELS: Record<OAuthProviderKey, string> = {
+  google: "Google",
+  github: "GitHub",
+  facebook: "Facebook"
+};
 
 function initialsFromUser(user: User | null) {
   const source = user?.name || user?.email || "Usuario";
@@ -60,6 +66,7 @@ export default function PerfilPage() {
   const [savingProfile, setSavingProfile] = useState(false);
   const [deletePassword, setDeletePassword] = useState("");
   const [deleting, setDeleting] = useState(false);
+  const [oauthProviders, setOauthProviders] = useState<OAuthProvidersResponse | null>(null);
   const objectUrlRef = useRef<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const month = new Date().toISOString().slice(0, 7);
@@ -87,6 +94,21 @@ export default function PerfilPage() {
   }, [load]);
 
   useEffect(() => () => clearObjectPreview(), [clearObjectPreview]);
+
+  useEffect(() => {
+    api.oauthProviders().then(setOauthProviders).catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    // A volta do vínculo OAuth (SEC-04) chega em ?linked=1, sem passar por
+    // useSearchParams para não exigir Suspense nesta página.
+    if (new URLSearchParams(window.location.search).get("linked") === "1") {
+      setMessage("Conta social vinculada.");
+      window.history.replaceState(null, "", "/perfil");
+      load().catch(() => undefined);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function updateSidebarUser() {
     window.dispatchEvent(new Event("trevo:user-updated"));
@@ -305,6 +327,39 @@ export default function PerfilPage() {
             <button className="btn-secondary" type="submit">Trocar senha</button>
           </div>
         </form>
+
+        <section className="app-card mt-4 p-4">
+          <SectionIntro
+            title="Contas sociais"
+            description="Vincule uma conta para entrar sem senha da próxima vez. Só é possível vincular uma conta social por vez, com a senha atual confirmada por esta sessão."
+          />
+          <div className="mt-3 grid gap-2 sm:grid-cols-3">
+            {(Object.keys(OAUTH_PROVIDER_LABELS) as OAuthProviderKey[]).map((provider) => {
+              const configured = Boolean(oauthProviders?.providers[provider]?.enabled);
+              const linked = user?.auth_provider === provider;
+              return (
+                <button
+                  key={provider}
+                  type="button"
+                  className="btn-secondary w-full text-xs disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={!configured || linked}
+                  title={
+                    linked
+                      ? "Já vinculado a esta conta"
+                      : !configured
+                        ? `${OAUTH_PROVIDER_LABELS[provider]} não configurado neste ambiente.`
+                        : undefined
+                  }
+                  onClick={() => {
+                    window.location.href = api.oauthLinkUrl(provider);
+                  }}
+                >
+                  {linked ? `${OAUTH_PROVIDER_LABELS[provider]} vinculado` : `Vincular ${OAUTH_PROVIDER_LABELS[provider]}`}
+                </button>
+              );
+            })}
+          </div>
+        </section>
 
         <section className="app-card mt-4 p-4">
           <SectionIntro

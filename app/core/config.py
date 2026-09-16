@@ -21,7 +21,12 @@ class Settings:
 
     jwt_secret_key: str = os.getenv("JWT_SECRET_KEY", "")
     jwt_algorithm: str = "HS256"
-    access_token_expire_hours: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_HOURS", "168"))
+    # SEC-07: era 168h (7 dias) sem renovação — uma sessão continuava válida
+    # por uma semana inteira mesmo parada. 24h + renovação deslizante (ver
+    # get_current_user) equivale, na prática, a "nunca expira em uso
+    # contínuo, expira em até 24h de inatividade" — mais seguro sem piorar
+    # a experiência de quem usa o produto todo dia.
+    access_token_expire_hours: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_HOURS", "24"))
 
     allowed_origins_raw: str = os.getenv("ALLOWED_ORIGINS", "")
     trusted_hosts_raw: str = os.getenv("TRUSTED_HOSTS", "")

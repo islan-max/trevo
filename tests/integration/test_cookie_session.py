@@ -9,8 +9,12 @@ caminho de produção nunca era exercitado. Ver TEST-01 na auditoria técnica.
 
 from __future__ import annotations
 
-import pytest
+from datetime import UTC, datetime, timedelta
 
+import pytest
+from freezegun import freeze_time
+
+from app.core.config import settings
 from tests.conftest import TEST_DB_URL, csrf_headers, register_user
 
 pytestmark = pytest.mark.skipif(not TEST_DB_URL, reason="TEST_DATABASE_URL is not configured")
@@ -80,3 +84,43 @@ async def test_cookie_csrf_endpoint_issues_token_for_authenticated_session(cooki
 
     assert response.status_code == 200, response.text
     assert response.json()["csrf_token"]
+
+
+@pytest.mark.asyncio
+async def test_cookie_session_renews_when_close_to_expiry(cookie_client):
+    """SEC-07: sessão de uso contínuo nunca deveria chegar perto de expirar —
+    get_current_user reemite o cookie quando falta menos de 25% da validade.
+
+    Usa freeze_time para simular a passagem do tempo sobre o token emitido
+    pelo login de verdade, em vez de fabricar um JWT à mão — exercita
+    literalmente o mesmo caminho de create_access_token/get_current_user
+    que a produção usa, sem depender de acertar manualmente todo claim que
+    esses dois pontos entendem.
+    """
+    total_hours = settings.access_token_expire_hours
+    base_time = datetime(2026, 1, 1, tzinfo=UTC)
+
+    with freeze_time(base_time):
+        await register_user(cookie_client)
+        original_token = cookie_client.cookies.get("trevo_access_token")
+
+    # Avança para dentro dos últimos 25% da validade (90% do tempo total já
+    # passado — bem abaixo do limiar de renovação).
+    with freeze_time(base_time + timedelta(hours=total_hours * 0.9)):
+        response = await cookie_client.get("/api/auth/me")
+
+    assert response.status_code == 200, response.text
+    assert cookie_client.cookies.get("trevo_access_token") != original_token
+
+
+@pytest.mark.asyncio
+async def test_cookie_session_does_not_renew_far_from_expiry(cookie_client):
+    """Contraste com o teste acima: sessão recém-emitida não é reemitida a
+    cada request — só perto do fim da validade."""
+    await register_user(cookie_client)
+
+    token_after_login = cookie_client.cookies.get("trevo_access_token")
+    response = await cookie_client.get("/api/auth/me")
+
+    assert response.status_code == 200, response.text
+    assert cookie_client.cookies.get("trevo_access_token") == token_after_login

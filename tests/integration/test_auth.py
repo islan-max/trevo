@@ -70,6 +70,44 @@ async def test_security_headers_are_applied(client):
 
 
 @pytest.mark.asyncio
+async def test_health_reports_signing_secret_source(client):
+    """SEC-05: a origem do segredo de assinatura fica visível em
+    /api/health, mesmo em serverless (onde validate_runtime_config não
+    roda). No ambiente de teste, JWT_SECRET_KEY está definida."""
+    response = await client.get("/api/health")
+    assert response.status_code == 200, response.text
+    assert response.json()["checks"]["signing"]["source"] == "env"
+
+
+@pytest.mark.asyncio
+async def test_register_omits_token_from_body_when_requested(client):
+    """SEC-12: o SPA sinaliza que só precisa do cookie — o corpo da resposta
+    não deveria carregar o token à toa."""
+    email = f"omit-{uuid.uuid4().hex}@example.test"
+    response = await client.post(
+        "/api/auth/register",
+        json={"name": "Teste", "email": email, "password": "Senha123", "accept_terms": True},
+        headers={"X-Token-Response": "omit"},
+    )
+    assert response.status_code == 201, response.text
+    assert "access_token" not in response.json()
+    assert response.json()["token_type"] == "bearer"
+    assert "trevo_access_token=" in response.headers.get("set-cookie", "")
+
+
+@pytest.mark.asyncio
+async def test_register_still_returns_token_without_the_header(client):
+    """Clientes de API que dependem de Bearer continuam recebendo o token."""
+    email = f"keep-{uuid.uuid4().hex}@example.test"
+    response = await client.post(
+        "/api/auth/register",
+        json={"name": "Teste", "email": email, "password": "Senha123", "accept_terms": True},
+    )
+    assert response.status_code == 201, response.text
+    assert "access_token" in response.json()
+
+
+@pytest.mark.asyncio
 async def test_profile_photo_upload_validates_and_updates_user(client, auth_headers):
     png_content = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
     response = await client.post(

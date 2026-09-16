@@ -22,6 +22,13 @@ _PROFILE_COLUMNS = (
 _SKIP_TABLES = {"revoked_tokens"}
 _TABLE_NAME_RE = re.compile(r"^[a-z_]+$")
 
+# SEC-08: card_pins não é pulada inteira (o usuário tem direito de saber que
+# tem um PIN cadastrado em qual cartão) — só a coluna do hash, pelo mesmo
+# motivo que _PROFILE_COLUMNS nunca inclui o hash de senha.
+_TABLE_EXCLUDED_COLUMNS: dict[str, set[str]] = {
+    "card_pins": {"pin_hash"},
+}
+
 
 def record_consent(
     cursor: Any,
@@ -79,9 +86,27 @@ def build_data_export(cursor: Any, user_id: str) -> dict:
     for table in tables:
         if not _TABLE_NAME_RE.match(table) or table.endswith("_state") or table in _SKIP_TABLES:
             continue
+        excluded_columns = _TABLE_EXCLUDED_COLUMNS.get(table)
         # table is validated by _TABLE_NAME_RE and sourced from information_schema;
         # user_id is parameterized.
-        cursor.execute(f'SELECT * FROM "{table}" WHERE user_id = %s', (user_id,))  # nosec B608
+        if excluded_columns:
+            cursor.execute(
+                """
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = %s AND table_schema = 'public'
+                ORDER BY ordinal_position
+                """,
+                (table,),
+            )
+            columns = [
+                r["column_name"]
+                for r in cursor.fetchall()
+                if r["column_name"] not in excluded_columns and _TABLE_NAME_RE.match(r["column_name"])
+            ]
+            column_list = ", ".join(f'"{column}"' for column in columns)
+            cursor.execute(f'SELECT {column_list} FROM "{table}" WHERE user_id = %s', (user_id,))  # nosec B608
+        else:
+            cursor.execute(f'SELECT * FROM "{table}" WHERE user_id = %s', (user_id,))  # nosec B608
         export[table] = [dict(r) for r in cursor.fetchall()]
 
     return export
