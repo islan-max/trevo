@@ -106,7 +106,10 @@ async def test_cookie_session_renews_when_close_to_expiry(cookie_client):
         resolve_jwt_secret(),
         algorithm="HS256",
     )
-    cookie_client.cookies.set("trevo_access_token", near_expiry_token)
+    # domain="test" precisa bater com o host do ASGITransport (base_url=
+    # "http://test") — sem isso, httpx guarda um segundo cookie de domínio
+    # diferente com o mesmo nome, e cookies.get() levanta CookieConflict.
+    cookie_client.cookies.set("trevo_access_token", near_expiry_token, domain="test")
 
     response = await cookie_client.get("/api/auth/me")
 
