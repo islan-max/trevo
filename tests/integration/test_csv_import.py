@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from app.main import build_duplicate_hash, db_cursor
 from tests.conftest import TEST_DB_URL
 
 pytestmark = pytest.mark.skipif(not TEST_DB_URL, reason="TEST_DATABASE_URL is not configured")
+
+FIXTURES_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "csv"
 
 
 CSV_CONTENT = "data;descricao;valor;tipo\n2024-05-01;Salario;3000;entrada\n02/05/2024;Mercado;-125,50;saida\n"
@@ -262,3 +266,147 @@ async def test_csv_import_infers_type_and_preserves_original_dates(client, auth_
         ("2026-08-01", "income", 1250.9),
         ("2026-08-02", "expense", 1250.9),
     ]
+
+
+@pytest.mark.asyncio
+async def test_csv_upload_skips_bank_preamble_before_header(client, auth_headers):
+    """CSV-04: parse_csv_rows sempre lia a linha 1 como cabeçalho. Extratos
+    bancários reais trazem linhas de preâmbulo (nome do banco, período,
+    agência) antes da linha de colunas — find_csv_header_line_index localiza
+    a linha real."""
+    content = (FIXTURES_DIR / "preambulo.csv").read_bytes()
+    response = await client.post(
+        "/api/imports/csv/upload", headers=auth_headers, files={"file": ("preambulo.csv", content, "text/csv")}
+    )
+    assert response.status_code == 200, response.text
+
+    assert set(response.json()["columns"]) == {"Data", "Historico", "Valor"}
+    assert response.json()["totalRows"] == 2
+
+
+@pytest.mark.asyncio
+async def test_csv_import_keeps_distinct_transactions_with_different_times(client, auth_headers):
+    """FIN-01: build_duplicate_hash não incluía hora nem conta. Duas
+    transações legítimas e distintas no mesmo dia (mesma descrição e valor,
+    hora diferente) produziam o mesmo hash e uma era descartada como
+    duplicata."""
+    content = (FIXTURES_DIR / "duplicatas.csv").read_bytes()
+    upload = await client.post(
+        "/api/imports/csv/upload", headers=auth_headers, files={"file": ("duplicatas.csv", content, "text/csv")}
+    )
+    assert upload.status_code == 200, upload.text
+    token = upload.json()["importToken"]
+    mapping = {"date": "Data", "description": "Descricao", "value": "Valor", "time": "Hora"}
+
+    confirm = await client.post(
+        "/api/imports/csv/confirm",
+        headers=auth_headers,
+        json={"importToken": token, "mapping": mapping, "mode": "merge"},
+    )
+    assert confirm.status_code == 200, confirm.text
+    assert confirm.json()["imported"] == 2
+
+
+@pytest.mark.asyncio
+async def test_csv_import_handles_en_us_thousands_separator(client, auth_headers):
+    """CSV-01: formato en-US ("1,234.56") não vira mais 1,23456."""
+    content = (FIXTURES_DIR / "en_us.csv").read_bytes()
+    upload = await client.post(
+        "/api/imports/csv/upload", headers=auth_headers, files={"file": ("en_us.csv", content, "text/csv")}
+    )
+    assert upload.status_code == 200, upload.text
+    mapping = {"date": "Date", "description": "Description", "value": "Amount"}
+    preview = await client.post(
+        "/api/imports/csv/preview",
+        headers=auth_headers,
+        json={"importToken": upload.json()["importToken"], "mapping": mapping},
+    )
+    assert preview.status_code == 200, preview.text
+    amounts = sorted(row["amount"] for row in preview.json()["preview"])
+    assert amounts == [45.9, 1234.56]
+
+
+@pytest.mark.asyncio
+async def test_csv_import_handles_parentheses_as_negative(client, auth_headers):
+    """CSV-02: valor negativo entre parênteses (comum em exports de cartão)
+    é reconhecido como despesa mesmo sem coluna de tipo."""
+    content = (FIXTURES_DIR / "parenteses.csv").read_bytes()
+    upload = await client.post(
+        "/api/imports/csv/upload", headers=auth_headers, files={"file": ("parenteses.csv", content, "text/csv")}
+    )
+    assert upload.status_code == 200, upload.text
+    mapping = {"date": "Data", "description": "Descricao", "value": "Valor"}
+    preview = await client.post(
+        "/api/imports/csv/preview",
+        headers=auth_headers,
+        json={"importToken": upload.json()["importToken"], "mapping": mapping},
+    )
+    assert preview.status_code == 200, preview.text
+    rows = {row["title"]: row for row in preview.json()["preview"]}
+    assert rows["Estorno de compra"]["type"] == "expense"
+    assert rows["Estorno de compra"]["amount"] == 123.45
+
+
+@pytest.mark.asyncio
+async def test_csv_import_handles_tab_delimiter(client, auth_headers):
+    """CSV-05: delimitador tabulação, além de ';' e ','."""
+    content = (FIXTURES_DIR / "tab.csv").read_bytes()
+    upload = await client.post(
+        "/api/imports/csv/upload", headers=auth_headers, files={"file": ("tab.csv", content, "text/csv")}
+    )
+    assert upload.status_code == 200, upload.text
+    assert upload.json()["columns"] == ["Data", "Descricao", "Valor"]
+    assert upload.json()["totalRows"] == 2
+
+
+@pytest.mark.asyncio
+async def test_csv_import_handles_utf8_bom(client, auth_headers):
+    content = (FIXTURES_DIR / "utf8_bom.csv").read_bytes()
+    upload = await client.post(
+        "/api/imports/csv/upload", headers=auth_headers, files={"file": ("utf8_bom.csv", content, "text/csv")}
+    )
+    assert upload.status_code == 200, upload.text
+    descriptions = {row["Descricao"] for row in upload.json()["preview"]}
+    assert "Alimentação" in descriptions
+
+
+@pytest.mark.asyncio
+async def test_csv_import_handles_cp1252_encoding(client, auth_headers):
+    """CSV-06: cp1252 antes do fallback final em latin-1, que nunca levanta
+    mas decodifica aspas curvas e travessão como caracteres errados."""
+    content = (FIXTURES_DIR / "cp1252.csv").read_bytes()
+    upload = await client.post(
+        "/api/imports/csv/upload", headers=auth_headers, files={"file": ("cp1252.csv", content, "text/csv")}
+    )
+    assert upload.status_code == 200, upload.text
+    descriptions = {row["Descricao"] for row in upload.json()["preview"]}
+    assert "Compra “promocional”" in descriptions
+
+
+@pytest.mark.asyncio
+async def test_csv_import_stores_account_separately_from_payment_method(client, auth_headers):
+    """CSV-08/09: a conta do extrato vai para a coluna account, não mais
+    payment_method — e external_id não recebe mais o duplicate_hash."""
+    upload = await client.post(
+        "/api/imports/csv/upload",
+        headers=auth_headers,
+        files={
+            "file": (
+                "extrato.csv",
+                b"data;descricao;valor;conta\n2024-05-01;Salario;3000;Conta Corrente\n",
+                "text/csv",
+            )
+        },
+    )
+    assert upload.status_code == 200, upload.text
+    mapping = {"date": "data", "description": "descricao", "value": "valor", "account": "conta"}
+    confirm = await client.post(
+        "/api/imports/csv/confirm",
+        headers=auth_headers,
+        json={"importToken": upload.json()["importToken"], "mapping": mapping},
+    )
+    assert confirm.status_code == 200, confirm.text
+    transaction = confirm.json()["transactions"][0]
+    assert transaction["account"] == "Conta Corrente"
+    assert transaction["payment_method"] == "csv_import"
+    assert transaction["external_id"] is None
