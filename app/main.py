@@ -3222,6 +3222,7 @@ def build_csv_import_preview(user_id: str, session: dict, mapping: CsvColumnMapp
             detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
             errors_list.append({"line": index, "detail": detail})
 
+    existing_hashes: set[str] = set()
     if parsed_rows:
         duplicate_hashes = sorted(
             {
@@ -3858,13 +3859,51 @@ def confirm_csv_import(payload: CsvImportConfirmPayload, current_user: dict = De
             replaced = cursor.rowcount or 0
             audit_log("csv_import_replace", user_id, {"months": months, "deleted": replaced})
 
+        # Duplicatas contra o estado ATUAL do banco — pós-delete, se "replace"
+        # rodou acima. Uma única consulta em lote (não uma por linha —
+        # PERF-01), recalculada aqui (não reaproveitada do preview) porque em
+        # modo "replace" o preview foi calculado ANTES do DELETE: usar o
+        # resultado dele aqui trataria como "duplicata" uma linha cujo
+        # correspondente acabou de ser apagado.
+        all_candidate_hashes = sorted(
+            {
+                candidate
+                for row in preview["rows"]
+                for candidate in (
+                    row["duplicateHash"],
+                    row.get("typeAwareDuplicateHash"),
+                    row.get("legacyDuplicateHash"),
+                )
+                if candidate
+            }
+        )
+        existing_hashes: set[str] = set()
+        if all_candidate_hashes:
+            cursor.execute(
+                "SELECT duplicate_hash FROM transactions WHERE user_id = %s AND duplicate_hash = ANY(%s)",
+                (user_id, all_candidate_hashes),
+            )
+            existing_hashes = {row["duplicate_hash"] for row in normalize_rows(cursor.fetchall())}
+
+        candidate_rows = []
+        duplicates: list[dict] = []
+        for row in preview["rows"]:
+            if (
+                row["duplicateHash"] in existing_hashes
+                or row.get("typeAwareDuplicateHash") in existing_hashes
+                or row.get("legacyDuplicateHash") in existing_hashes
+            ):
+                duplicates.append(row)
+            else:
+                candidate_rows.append(row)
+
         # PERF-01: era um SELECT de duplicata + um INSERT por linha (até
         # 5.000 idas ao banco cada, em serverless cada uma abrindo conexão
-        # própria). ON CONFLICT DO NOTHING resolve tudo em uma única
-        # instrução, usando o índice único que já existe — tanto contra o
-        # que já está no banco (modo "merge") quanto entre linhas do próprio
-        # arquivo (Postgres descarta conflitos dentro do mesmo INSERT
-        # também). RETURNING * devolve só as linhas que entraram de fato.
+        # própria). ON CONFLICT DO NOTHING fica como cinto e suspensório
+        # contra duas linhas idênticas dentro do próprio arquivo (Postgres
+        # descarta conflitos dentro do mesmo INSERT também), usando o índice
+        # único que já existe. RETURNING * devolve só as linhas que entraram
+        # de fato.
         #
         # CSV-08/09: payment_method deixa de receber a conta (que polui o
         # paymentMethodBreakdown do dashboard com nomes de conta em vez de
@@ -3887,7 +3926,7 @@ def confirm_csv_import(payload: CsvImportConfirmPayload, current_user: dict = De
                 import_batch_id,
                 row.get("account"),
             )
-            for row in preview["rows"]
+            for row in candidate_rows
         ]
 
         imported: list[dict] = []
@@ -3913,8 +3952,11 @@ def confirm_csv_import(payload: CsvImportConfirmPayload, current_user: dict = De
             )
             imported = normalize_rows(inserted_rows)
 
-    inserted_hashes = {row["duplicate_hash"] for row in imported}
-    duplicates = [row for row in preview["rows"] if row["duplicateHash"] not in inserted_hashes]
+        # Alguma linha ainda pode ter sido descartada pelo ON CONFLICT (duas
+        # linhas idênticas dentro do próprio arquivo) — conta como duplicata
+        # também.
+        inserted_hashes = {row["duplicate_hash"] for row in imported}
+        duplicates.extend(row for row in candidate_rows if row["duplicateHash"] not in inserted_hashes)
 
     csv_import_sessions.pop(payload.importToken, None)
     if storage_available():
