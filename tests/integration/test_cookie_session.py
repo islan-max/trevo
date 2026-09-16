@@ -12,10 +12,9 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from jose import jwt
+from freezegun import freeze_time
 
 from app.core.config import settings
-from app.core.signing import resolve_jwt_secret
 from tests.conftest import TEST_DB_URL, csrf_headers, register_user
 
 pytestmark = pytest.mark.skipif(not TEST_DB_URL, reason="TEST_DATABASE_URL is not configured")
@@ -90,37 +89,28 @@ async def test_cookie_csrf_endpoint_issues_token_for_authenticated_session(cooki
 @pytest.mark.asyncio
 async def test_cookie_session_renews_when_close_to_expiry(cookie_client):
     """SEC-07: sessão de uso contínuo nunca deveria chegar perto de expirar —
-    get_current_user reemite o cookie quando falta menos de 25% da validade."""
-    await register_user(cookie_client)
+    get_current_user reemite o cookie quando falta menos de 25% da validade.
+
+    Usa freeze_time para simular a passagem do tempo sobre o token emitido
+    pelo login de verdade, em vez de fabricar um JWT à mão — exercita
+    literalmente o mesmo caminho de create_access_token/get_current_user
+    que a produção usa, sem depender de acertar manualmente todo claim que
+    esses dois pontos entendem.
+    """
     total_hours = settings.access_token_expire_hours
+    base_time = datetime(2026, 1, 1, tzinfo=UTC)
 
-    now = datetime.now(UTC)
-    remaining_hours = total_hours * 0.1  # bem abaixo do limiar de 25%
-    issued_at = now - timedelta(hours=total_hours - remaining_hours)
-    expires_at = issued_at + timedelta(hours=total_hours)
-    me_before = await cookie_client.get("/api/auth/me")
-    user_id = me_before.json()["id"]
+    with freeze_time(base_time):
+        await register_user(cookie_client)
+        original_token = cookie_client.cookies.get("trevo_access_token")
 
-    near_expiry_token = jwt.encode(
-        {"sub": user_id, "iat": int(issued_at.timestamp()), "exp": int(expires_at.timestamp())},
-        resolve_jwt_secret(),
-        algorithm="HS256",
-    )
-    # Remove antes de setar: sem isso, o cookie já guardado da resposta do
-    # registro (domain/path do ASGITransport) convive com o que setamos aqui
-    # e cookies.get()/set() levantam CookieConflict quando os atributos não
-    # batem exatamente.
-    cookie_client.cookies.delete("trevo_access_token")
-    cookie_client.cookies.set("trevo_access_token", near_expiry_token, domain="test", path="/")
+    # Avança para dentro dos últimos 25% da validade (90% do tempo total já
+    # passado — bem abaixo do limiar de renovação).
+    with freeze_time(base_time + timedelta(hours=total_hours * 0.9)):
+        response = await cookie_client.get("/api/auth/me")
 
-    response = await cookie_client.get("/api/auth/me")
     assert response.status_code == 200, response.text
-
-    # A renovação troca o cookie por um novo Set-Cookie do próprio domain/path
-    # — não sobra nenhum resquício do valor manual que fabricamos.
-    remaining = [cookie for cookie in cookie_client.cookies.jar if cookie.name == "trevo_access_token"]
-    assert len(remaining) == 1
-    assert remaining[0].value != near_expiry_token
+    assert cookie_client.cookies.get("trevo_access_token") != original_token
 
 
 @pytest.mark.asyncio
