@@ -134,14 +134,18 @@ export default function TransacoesPage() {
 
   async function handleDelete(item: Transaction) {
     if (!token) return;
+    const isInstallment = item.type === "expense" && (item.total_installments ?? 1) > 1;
     const confirmDelete = window.confirm(
-      item.type === "expense" && (item.total_installments ?? 1) > 1
+      isInstallment
         ? `Excluir "${item.title}"? Como esta compra é parcelada, todas as parcelas também serão removidas.`
         : `Excluir "${item.title}"?`
     );
     if (!confirmDelete) return;
     try {
-      await api.deleteTransaction(token, item.id);
+      // scope=group precisa acompanhar o aviso acima — a API agora recusa
+      // (409) apagar uma parcela sem confirmação explícita de que o grupo
+      // inteiro sai junto.
+      await api.deleteTransaction(token, item.id, isInstallment ? "group" : "single");
       setMessage("Movimentação excluída.");
       await load();
     } catch (err) {

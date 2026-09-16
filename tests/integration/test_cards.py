@@ -60,3 +60,44 @@ async def test_pin_rate_limiting(client):
         response = await client.post(f"/api/cards/{card_id}/unlock", headers=headers, json={"pin": "9999"})
         statuses.append(response.status_code)
     assert 429 in statuses
+
+
+@pytest.mark.asyncio
+async def test_installment_group_does_not_collide_between_distinct_purchases(client):
+    """DOM-01: installment_group era uma chave derivada de texto do usuário
+    (user_id-card_id-título-data) — duas compras idênticas no mesmo dia
+    colidiam no mesmo grupo. Agora é um UUID por compra."""
+    user = await register_user(client)
+    headers = {"Authorization": f"Bearer {user['token']}"}
+
+    card_response = await client.post(
+        "/api/cards",
+        headers=headers,
+        json={
+            "name": "Cartão de teste",
+            "brand": "Visa",
+            "lastFour": "1234",
+            "creditLimit": 5000,
+            "closingDay": 20,
+            "dueDay": 28,
+            "color": "#171717",
+        },
+    )
+    assert card_response.status_code == 200, card_response.text
+    card_id = card_response.json()["id"]
+
+    installment_payload = {
+        "title": "Passagem aérea",
+        "totalAmount": 1200,
+        "totalInstallments": 3,
+        "purchaseDate": "2026-09-05",
+    }
+
+    first = await client.post(f"/api/cards/{card_id}/installments", headers=headers, json=installment_payload)
+    assert first.status_code == 200, first.text
+    second = await client.post(f"/api/cards/{card_id}/installments", headers=headers, json=installment_payload)
+    assert second.status_code == 200, second.text
+
+    assert first.json()["group"] != second.json()["group"]
+    assert first.json()["createdInstallments"] == 3
+    assert second.json()["createdInstallments"] == 3

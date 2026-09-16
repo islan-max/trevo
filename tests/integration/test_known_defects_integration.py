@@ -6,6 +6,9 @@ se passar sem que o xfail seja removido — o lembrete para tirar a marca no
 breakpoint que aplica a correção.
 
 Ver docs/auditoria-2026-09.md para o achado completo de cada ID.
+
+DATA-01, DOM-01 e SEC-03 foram corrigidos no BP-02 e seus testes promovidos
+para test_csv_import.py, test_cards.py e test_categories.py, respectivamente.
 """
 
 from __future__ import annotations
@@ -39,83 +42,6 @@ async def _create_card(client, headers: dict[str, str], *, closing_day: int = 20
     response = await client.post("/api/cards", headers=headers, json=payload)
     assert response.status_code == 200, response.text
     return response.json()["id"]
-
-
-@pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "DATA-01: o modo 'replace' da importação de CSV apaga TODOS os "
-        "lançamentos do mês (WHERE ... = ANY(months), sem filtro por "
-        "source), incluindo lançamentos manuais e parcelas de cartão que "
-        "não vieram do arquivo."
-    ),
-)
-async def test_csv_replace_mode_preserves_manual_transactions(client):
-    headers = await _auth_headers(client)
-
-    manual = await client.post(
-        "/api/transactions",
-        headers=headers,
-        json={
-            "title": "Aluguel",
-            "amount": 1800,
-            "type": "expense",
-            "paymentMethod": "pix",
-            "transactionDate": "2026-09-01",
-        },
-    )
-    assert manual.status_code == 200, manual.text
-    manual_id = manual.json()["id"]
-
-    content = (FIXTURES_DIR / "pt_br.csv").read_bytes()
-    upload = await client.post(
-        "/api/imports/csv/upload", headers=headers, files={"file": ("pt_br.csv", content, "text/csv")}
-    )
-    assert upload.status_code == 200, upload.text
-    token = upload.json()["importToken"]
-    mapping = {"date": "Data", "description": "Descricao", "value": "Valor", "type": "Tipo"}
-
-    confirm = await client.post(
-        "/api/imports/csv/confirm",
-        headers=headers,
-        json={"importToken": token, "mapping": mapping, "mode": "replace"},
-    )
-    assert confirm.status_code == 200, confirm.text
-
-    remaining = await client.get("/api/transactions", headers=headers, params={"month": "2026-09"})
-    remaining_ids = [row["id"] for row in remaining.json()]
-    assert manual_id in remaining_ids
-
-
-@pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "DOM-01: installment_group é montado como "
-        "f'{user_id}-{card_id}-{title}-{purchase_date}' — uma chave "
-        "natural derivada de texto do usuário. Duas compras parceladas "
-        "idênticas (mesmo título, cartão e data) colidem no mesmo grupo."
-    ),
-)
-async def test_installment_group_does_not_collide_between_distinct_purchases(client):
-    headers = await _auth_headers(client)
-    card_id = await _create_card(client, headers)
-
-    installment_payload = {
-        "title": "Passagem aérea",
-        "totalAmount": 1200,
-        "totalInstallments": 3,
-        "purchaseDate": "2026-09-05",
-    }
-
-    first = await client.post(f"/api/cards/{card_id}/installments", headers=headers, json=installment_payload)
-    assert first.status_code == 200, first.text
-    second = await client.post(f"/api/cards/{card_id}/installments", headers=headers, json=installment_payload)
-    assert second.status_code == 200, second.text
-
-    assert first.json()["group"] != second.json()["group"]
-    assert second.json()["createdInstallments"] == 3
 
 
 @pytest.mark.asyncio
@@ -172,39 +98,6 @@ async def test_card_purchase_after_closing_day_bills_next_month(client):
     assert response.status_code == 200, response.text
 
     assert response.json()["billing_month"] == "2026-10"
-
-
-@pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "SEC-03: create_category faz ON CONFLICT (user_id, name) DO "
-        "UPDATE SET type = EXCLUDED.type — criar uma categoria com o "
-        "nome de uma categoria ATIVA existente reescreve o type dela em "
-        "vez de responder 409, reclassificando o histórico ligado a ela."
-    ),
-)
-async def test_create_category_does_not_overwrite_active_category_type(client):
-    headers = await _auth_headers(client)
-
-    first = await client.post(
-        "/api/categories",
-        headers=headers,
-        json={"name": "Categoria Teste XPTO", "type": "expense", "color": "#2E9D5B", "icon": "🛒"},
-    )
-    assert first.status_code == 200, first.text
-    category_id = first.json()["id"]
-
-    conflicting = await client.post(
-        "/api/categories",
-        headers=headers,
-        json={"name": "Categoria Teste XPTO", "type": "income", "color": "#2E9D5B", "icon": "💼"},
-    )
-    assert conflicting.status_code == 409, conflicting.text
-
-    bootstrap = await client.get("/api/bootstrap", headers=headers)
-    category = next(c for c in bootstrap.json()["categories"] if c["id"] == category_id)
-    assert category["type"] == "expense"
 
 
 @pytest.mark.asyncio

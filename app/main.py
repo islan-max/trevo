@@ -3692,16 +3692,26 @@ def confirm_csv_import(payload: CsvImportConfirmPayload, current_user: dict = De
     duplicates: list[dict] = []
     replaced = 0
     months = [entry["month"] for entry in preview["months"]]
+    # Identifica este lote — usado para rastrear quais lançamentos vieram
+    # desta importação específica (relatórios futuros, "desfazer importação").
+    import_batch_id = str(uuid.uuid4())
 
     with db_cursor(commit=True) as cursor:
         if payload.mode == "replace" and months:
-            # Substituir troca os lançamentos dos meses presentes no arquivo —
-            # e só deles. Meses fora do CSV ficam intactos, senão uma
-            # importação de um mês apagaria o histórico inteiro.
+            # Substituir troca os lançamentos IMPORTADOS POR CSV dos meses
+            # presentes no arquivo — e só deles. Meses fora do CSV ficam
+            # intactos, e lançamentos manuais ou parcelas de cartão nunca são
+            # tocados: sem o filtro por source, "substituir" apagava o
+            # aluguel digitado à mão e mutilava grupos de parcelamento pela
+            # metade (DATA-01). installment_group IS NULL é redundante hoje
+            # — a importação nunca grava parcelas — e fica como cinto e
+            # suspensório contra uma mudança futura.
             cursor.execute(
                 """
                 DELETE FROM transactions
                 WHERE user_id = %s
+                  AND source = 'csv_import'
+                  AND installment_group IS NULL
                   AND COALESCE(billing_month, substring(transaction_date from 1 for 7)) = ANY(%s)
                 """,
                 (user_id, months),
@@ -3736,9 +3746,9 @@ def confirm_csv_import(payload: CsvImportConfirmPayload, current_user: dict = De
                 INSERT INTO transactions
                   (user_id, title, amount, type, category_id, payment_method, transaction_date, notes, card_id,
                    billing_month, installment_group, installment_number, total_installments, source, external_id,
-                   imported_at, raw_description, duplicate_hash)
+                   imported_at, raw_description, duplicate_hash, import_batch_id)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NULL, %s, NULL, NULL, NULL,
-                        'csv_import', %s, NOW(), %s, %s)
+                        'csv_import', %s, NOW(), %s, %s, %s)
                 RETURNING *
                 """,
                 (
@@ -3754,6 +3764,7 @@ def confirm_csv_import(payload: CsvImportConfirmPayload, current_user: dict = De
                     row["duplicateHash"],
                     row["rawDescription"],
                     row["duplicateHash"],
+                    import_batch_id,
                 ),
             )
             imported.append(require_row(normalize_row(cursor.fetchone()), "Lançamento importado não criado."))
@@ -4104,23 +4115,43 @@ def create_category(payload: CategoryPayload, current_user: dict = Depends(get_c
     try:
         with db_cursor(commit=True) as cursor:
             cursor.execute(
-                """
-                INSERT INTO categories (user_id, name, type, color, icon, is_default, is_active)
-                VALUES (%s, %s, %s, %s, %s, 0, TRUE)
-                ON CONFLICT (user_id, name)
-                DO UPDATE SET
-                    type = EXCLUDED.type,
-                    color = EXCLUDED.color,
-                    icon = EXCLUDED.icon,
-                    is_active = TRUE,
-                    updated_at = NOW()
-                RETURNING *
-                """,
-                (user_id, name, payload.type, color, icon),
+                "SELECT id, is_active FROM categories WHERE user_id = %s AND name = %s",
+                (user_id, name),
             )
+            existing = normalize_row(cursor.fetchone())
+
+            if existing and existing["is_active"]:
+                # SEC-03: o antigo ON CONFLICT ... DO UPDATE SET type = EXCLUDED.type
+                # reescrevia o type de uma categoria ATIVA existente, reclassificando
+                # em massa todo o hist\u00f3rico ligado a ela. Nome j\u00e1 em uso por uma
+                # categoria ativa \u00e9 conflito, n\u00e3o atualiza\u00e7\u00e3o.
+                raise HTTPException(status_code=409, detail="Categoria j\u00e1 existe.")
+
+            if existing:
+                # Reativa a categoria arquivada. O type NUNCA muda aqui pelo
+                # mesmo motivo acima \u2014 s\u00f3 is_active, color e icon acompanham a
+                # escolha atual do usu\u00e1rio.
+                cursor.execute(
+                    """
+                    UPDATE categories
+                    SET color = %s, icon = %s, is_active = TRUE, updated_at = NOW()
+                    WHERE id = %s
+                    RETURNING *
+                    """,
+                    (color, icon, existing["id"]),
+                )
+            else:
+                cursor.execute(
+                    """
+                    INSERT INTO categories (user_id, name, type, color, icon, is_default, is_active)
+                    VALUES (%s, %s, %s, %s, %s, 0, TRUE)
+                    RETURNING *
+                    """,
+                    (user_id, name, payload.type, color, icon),
+                )
             row = require_row(normalize_row(cursor.fetchone()), "Categoria n\u00e3o criada.")
     except errors.UniqueViolation:
-        raise HTTPException(status_code=400, detail="Categoria j\u00e1 existe.") from None
+        raise HTTPException(status_code=409, detail="Categoria j\u00e1 existe.") from None
 
     return row
 
@@ -4951,7 +4982,11 @@ def create_installments(card_id: int, payload: InstallmentPayload, current_user:
 
             # Compra feita depois do fechamento entra na fatura do m\u00eas seguinte.
             first_month = first_billing_month(purchase_date, card.get("closing_day"))
-            group = f"{user_id}-{card_id}-{title}-{purchase_date}"
+            # UUID, n\u00e3o uma chave derivada de (user, cart\u00e3o, t\u00edtulo, data): duas
+            # compras iguais no mesmo dia (duas passagens, dois notebooks da
+            # fam\u00edlia) colidiam no mesmo grupo, duplicando installment_number e
+            # fazendo a exclus\u00e3o de uma apagar as duas (DOM-01).
+            group = str(uuid.uuid4())
             for number, amount in enumerate(installment_amounts, start=1):
                 cursor.execute(
                     """
@@ -5063,7 +5098,8 @@ def create_installments_without_card(
     
     try:
         with db_cursor(commit=True) as cursor:
-            group = f"{user_id}-installment-{title}-{purchase_date}"
+            # UUID pelo mesmo motivo de create_installments (DOM-01).
+            group = str(uuid.uuid4())
             for number, amount in enumerate(installment_amounts, start=1):
                 cursor.execute(
                     """
@@ -5160,7 +5196,11 @@ def get_future_installments(
 
 
 @app.delete("/api/transactions/{transaction_id}")
-def delete_transaction(transaction_id: int, current_user: dict = Depends(get_current_user)) -> dict:
+def delete_transaction(
+    transaction_id: int,
+    scope: Literal["single", "group"] = "single",
+    current_user: dict = Depends(get_current_user),
+) -> dict:
     user_id = current_user["id"]
 
     with db_cursor(commit=True) as cursor:
@@ -5177,6 +5217,28 @@ def delete_transaction(transaction_id: int, current_user: dict = Depends(get_cur
             raise HTTPException(status_code=404, detail="Lan\u00e7amento n\u00e3o encontrado.")
 
         if tx["installment_group"]:
+            if scope != "group":
+                # FIN-10: apagar uma parcela apagava o grupo inteiro sem
+                # sinalizar isso antes \u2014 a API s\u00f3 avisava depois, com
+                # deletedGroup: true. Agora \u00e9 preciso confirmar explicitamente.
+                cursor.execute(
+                    """
+                    SELECT COUNT(*) AS total
+                    FROM transactions
+                    WHERE user_id = %s AND installment_group = %s
+                    """,
+                    (user_id, tx["installment_group"]),
+                )
+                total = int(
+                    require_row(normalize_row(cursor.fetchone()), "Contagem de parcelas n\u00e3o encontrada.")["total"]
+                )
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Este lan\u00e7amento faz parte de um parcelamento com {total} parcela(s). "
+                        "Envie scope=group para excluir todas."
+                    ),
+                )
             cursor.execute(
                 """
             DELETE FROM transactions
