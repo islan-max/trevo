@@ -106,15 +106,21 @@ async def test_cookie_session_renews_when_close_to_expiry(cookie_client):
         resolve_jwt_secret(),
         algorithm="HS256",
     )
-    # domain="test" precisa bater com o host do ASGITransport (base_url=
-    # "http://test") — sem isso, httpx guarda um segundo cookie de domínio
-    # diferente com o mesmo nome, e cookies.get() levanta CookieConflict.
-    cookie_client.cookies.set("trevo_access_token", near_expiry_token, domain="test")
+    # Remove antes de setar: sem isso, o cookie já guardado da resposta do
+    # registro (domain/path do ASGITransport) convive com o que setamos aqui
+    # e cookies.get()/set() levantam CookieConflict quando os atributos não
+    # batem exatamente.
+    cookie_client.cookies.delete("trevo_access_token")
+    cookie_client.cookies.set("trevo_access_token", near_expiry_token, domain="test", path="/")
 
     response = await cookie_client.get("/api/auth/me")
-
     assert response.status_code == 200, response.text
-    assert cookie_client.cookies.get("trevo_access_token") != near_expiry_token
+
+    # A renovação troca o cookie por um novo Set-Cookie do próprio domain/path
+    # — não sobra nenhum resquício do valor manual que fabricamos.
+    remaining = [cookie for cookie in cookie_client.cookies.jar if cookie.name == "trevo_access_token"]
+    assert len(remaining) == 1
+    assert remaining[0].value != near_expiry_token
 
 
 @pytest.mark.asyncio
