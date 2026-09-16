@@ -58,7 +58,7 @@ factory-boy==3.3.3
     # via -r requirements.txt
 faker==40.20.0
     # via factory-boy
-fastapi==0.136.3
+fastapi==0.139.0
     # via -r requirements.txt
 freezegun==1.5.5
     # via -r requirements.txt
