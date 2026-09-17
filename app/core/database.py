@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
+from contextvars import ContextVar
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -17,6 +18,29 @@ logger = logging.getLogger("trevo.database")
 # opens a short connection against the Supabase transaction pooler (port 6543)
 # and closes it. DATABASE_URL must point at the pooler when running on Vercel.
 _db_pool: ThreadedConnectionPool | None = None
+
+# PERF-04: sem isso, cada chamada a connection() em modo serverless abria uma
+# conexão nova — um request que faz 10 queries abria 10 conexões contra o
+# pooler. `_NOT_IN_REQUEST` distingue "fora de uma request" (script de
+# migração, por exemplo, onde o comportamento antigo de abrir-e-fechar
+# continua valendo) de "dentro de uma request, conexão ainda não aberta"
+# (onde a primeira conexão aberta é guardada e reaproveitada até o fim dela).
+_NOT_IN_REQUEST = object()
+_request_connection: ContextVar[object] = ContextVar("request_connection", default=_NOT_IN_REQUEST)
+
+
+def open_request_scope() -> None:
+    """Serverless only: marca o início de uma request para connection() cachear a 1ª conexão."""
+    if settings.is_serverless:
+        _request_connection.set(None)
+
+
+def close_request_scope() -> None:
+    """Fecha a conexão compartilhada da request (se alguma tiver sido aberta)."""
+    conn = _request_connection.get()
+    if conn is not None and conn is not _NOT_IN_REQUEST:
+        conn.close()
+    _request_connection.set(_NOT_IN_REQUEST)
 
 
 def get_database_url() -> str:
@@ -58,7 +82,17 @@ def storage_available() -> bool:
 def connection() -> Iterator[psycopg2.extensions.connection]:
     """Yield a raw connection (used by migrations and multi-statement work)."""
     if settings.is_serverless:
+        current = _request_connection.get()
+        if current is not None and current is not _NOT_IN_REQUEST:
+            yield current
+            return
         conn = psycopg2.connect(get_database_url())
+        if current is None:
+            # Dentro do escopo de uma request (open_request_scope já rodou):
+            # guarda essa conexão para as próximas chamadas a connection().
+            _request_connection.set(conn)
+            yield conn
+            return
         try:
             yield conn
         finally:

@@ -42,10 +42,12 @@ from app.core import storage
 from app.core.config import settings
 from app.core.database import (
     close_db_pool,
+    close_request_scope,
     connection,
     db_cursor,
     get_database_url,
     init_db_pool,
+    open_request_scope,
     storage_available,
 )
 from app.core.logging import JsonLogFormatter
@@ -331,10 +333,18 @@ async def add_request_id(request: Request, call_next):
     request.state.request_id = request_id
     _request_cache.set({})
     if not _schema_checked and request.url.path.startswith("/api/"):
+        # Roda antes de open_request_scope(): essa checagem usa sua própria
+        # conexão de uso único (run_in_threadpool copia o contexto atual para
+        # a thread, então uma conexão cacheada lá dentro nunca seria fechada
+        # de volta no contexto da request).
         await run_in_threadpool(ensure_serverless_schema)
-    response = await call_next(request)
-    response.headers["X-Request-Id"] = request_id
-    return response
+    open_request_scope()
+    try:
+        response = await call_next(request)
+        response.headers["X-Request-Id"] = request_id
+        return response
+    finally:
+        close_request_scope()
 
 
 @app.middleware("http")
@@ -1299,6 +1309,10 @@ def link_oauth_identity_to_user(user_id: str, profile: dict[str, str]) -> None:
 
 
 def get_settings(user_id: str) -> dict:
+    return request_cached(("settings", user_id), lambda: _compute_settings(user_id))
+
+
+def _compute_settings(user_id: str) -> dict:
     with db_cursor() as cursor:
         cursor.execute("SELECT * FROM settings WHERE user_id = %s AND id = 1", (user_id,))
         row = normalize_row(cursor.fetchone())
@@ -1336,6 +1350,10 @@ def get_effective_income(user_settings: dict, inflow: Any) -> Decimal:
 
 
 def list_categories(user_id: str) -> list[dict]:
+    return request_cached(("categories", user_id), lambda: _compute_categories(user_id))
+
+
+def _compute_categories(user_id: str) -> list[dict]:
     with db_cursor() as cursor:
         cursor.execute(
             """
@@ -1351,6 +1369,10 @@ def list_categories(user_id: str) -> list[dict]:
 
 
 def list_cards(user_id: str) -> list[dict]:
+    return request_cached(("cards", user_id), lambda: _compute_cards(user_id))
+
+
+def _compute_cards(user_id: str) -> list[dict]:
     with db_cursor() as cursor:
         cursor.execute(
             """
@@ -1420,115 +1442,152 @@ def list_transactions(
 
 
 def get_cards_summary(user_id: str, month: str) -> list[dict]:
+    # PERF-03: bootstrap() e get_reports_summary() chamam get_dashboard()
+    # (que j\u00e1 pede isto por dentro) E get_cards_summary() de novo com os
+    # mesmos argumentos \u2014 cache de escopo de request evita computar duas
+    # vezes dentro do mesmo request, sem risco de servir dado velho entre
+    # requests diferentes.
+    return request_cached(("cards_summary", user_id, month), lambda: _compute_cards_summary(user_id, month))
+
+
+def _compute_cards_summary(user_id: str, month: str) -> list[dict]:
+    """Resumo de todos os cart\u00f5es do usu\u00e1rio para o m\u00eas.
+
+    PERF-02: a vers\u00e3o anterior fazia 2 queries por cart\u00e3o + 1 por grupo de
+    parcelamento (at\u00e9 ~70 idas ao banco com 3 cart\u00f5es e 20 grupos), cada uma
+    abrindo a pr\u00f3pria conex\u00e3o em serverless. Agora s\u00e3o sempre 4 queries no
+    total, batidas por card_id \u2014 n\u00e3o escala com o n\u00famero de cart\u00f5es/grupos.
+    """
     cards = list_cards(user_id)
-    result: list[dict] = []
+    if not cards:
+        return []
+    card_ids = [int(card["id"]) for card in cards]
 
     with db_cursor() as cursor:
-        for card in cards:
-            cursor.execute(
-                """
-                SELECT COALESCE(SUM(amount), 0) AS total
-                FROM transactions
-                WHERE user_id = %s
-                  AND type = 'expense'
-                  AND card_id = %s
-                  AND COALESCE(billing_month, substring(transaction_date from 1 for 7)) = %s
-                """,
-                (user_id, card["id"], month),
-            )
-            invoice_row = require_row(normalize_row(cursor.fetchone()), "Resumo do cart\u00e3o n\u00e3o encontrado.")
-            invoice = round_money(invoice_row["total"])
+        cursor.execute(
+            """
+            SELECT card_id, COALESCE(SUM(amount), 0) AS total
+            FROM transactions
+            WHERE user_id = %s
+              AND type = 'expense'
+              AND card_id = ANY(%s)
+              AND COALESCE(billing_month, substring(transaction_date from 1 for 7)) = %s
+            GROUP BY card_id
+            """,
+            (user_id, card_ids, month),
+        )
+        invoice_by_card = {row["card_id"]: round_money(row["total"]) for row in normalize_rows(cursor.fetchall())}
 
-            cursor.execute(
-                """
-                SELECT installment_group
-                FROM transactions
-                WHERE user_id = %s
-                  AND card_id = %s
-                  AND installment_group IS NOT NULL
-                GROUP BY installment_group
-                """,
-                (user_id, card["id"]),
-            )
-            groups = normalize_rows(cursor.fetchall())
+        # Parcela corrente de cada grupo (existe uma linha com billing_month
+        # = m\u00eas pedido).
+        cursor.execute(
+            """
+            SELECT card_id, installment_group, installment_number, total_installments, title, amount
+            FROM transactions
+            WHERE user_id = %s
+              AND card_id = ANY(%s)
+              AND installment_group IS NOT NULL
+              AND billing_month = %s
+            """,
+            (user_id, card_ids, month),
+        )
+        current_by_group = {
+            (row["card_id"], row["installment_group"]): row for row in normalize_rows(cursor.fetchall())
+        }
 
-            active_installments: list[dict] = []
-            for group in groups:
-                cursor.execute(
-                    """
-                    SELECT installment_number, total_installments, title, amount, billing_month
-                    FROM transactions
-                    WHERE user_id = %s
-                      AND card_id = %s
-                      AND installment_group = %s
-                      AND billing_month = %s
-                    LIMIT 1
-                    """,
-                    (user_id, card["id"], group["installment_group"], month),
+        # Para grupos sem parcela no m\u00eas corrente: a mais antiga entre as
+        # faturas futuras, mais quantas restam. DISTINCT ON pega a linha de
+        # billing_month mais cedo por grupo; a janela conta todo o grupo.
+        cursor.execute(
+            """
+            SELECT DISTINCT ON (card_id, installment_group)
+              card_id, installment_group, title, amount,
+              COUNT(*) OVER (PARTITION BY card_id, installment_group) AS future_count
+            FROM transactions
+            WHERE user_id = %s
+              AND card_id = ANY(%s)
+              AND installment_group IS NOT NULL
+              AND billing_month >= %s
+            ORDER BY card_id, installment_group, billing_month ASC
+            """,
+            (user_id, card_ids, month),
+        )
+        future_by_group = {
+            (row["card_id"], row["installment_group"]): row for row in normalize_rows(cursor.fetchall())
+        }
+
+        cursor.execute(
+            """
+            SELECT card_id, COALESCE(SUM(amount), 0) AS total, COUNT(*) AS remaining_installments
+            FROM transactions
+            WHERE user_id = %s
+              AND card_id = ANY(%s)
+              AND type = 'expense'
+              AND installment_group IS NOT NULL
+              AND billing_month >= %s
+            GROUP BY card_id
+            """,
+            (user_id, card_ids, month),
+        )
+        commitment_by_card = {
+            row["card_id"]: {
+                "committedLimit": round_money(row["total"]),
+                "remainingInstallments": int(row["remaining_installments"]),
+            }
+            for row in normalize_rows(cursor.fetchall())
+        }
+
+    groups_by_card: dict[int, set[str]] = {}
+    for card_id, group in current_by_group:
+        groups_by_card.setdefault(card_id, set()).add(group)
+    for card_id, group in future_by_group:
+        groups_by_card.setdefault(card_id, set()).add(group)
+
+    result: list[dict] = []
+    for card in cards:
+        # list_cards() agora é cacheado por request (request_cached) — os
+        # dicts aqui são compartilhados com quem mais chamar list_cards()
+        # nesta mesma request, então os campos calculados abaixo vão numa
+        # cópia, nunca no dict original.
+        card = dict(card)
+        card_id = int(card["id"])
+        invoice = invoice_by_card.get(card_id, Decimal("0"))
+
+        active_installments: list[dict] = []
+        for group in sorted(groups_by_card.get(card_id, ())):
+            key = (card_id, group)
+            current_row = current_by_group.get(key)
+            if current_row:
+                active_installments.append(
+                    {
+                        "title": current_row["title"],
+                        "installmentLabel": f'{current_row["installment_number"]}/{current_row["total_installments"]}',
+                        "remaining": current_row["total_installments"] - current_row["installment_number"],
+                        "amount": round_money(current_row["amount"]),
+                    }
                 )
-                current_row = normalize_row(cursor.fetchone())
-
-                if current_row:
-                    active_installments.append(
-                        {
-                            "title": current_row["title"],
-                            "installmentLabel": f'{current_row["installment_number"]}/{current_row["total_installments"]}',
-                            "remaining": current_row["total_installments"] - current_row["installment_number"],
-                            "amount": round_money(current_row["amount"]),
-                        }
-                    )
-                    continue
-
-                cursor.execute(
-                    """
-                    SELECT COUNT(*) AS total
-                    FROM transactions
-                    WHERE user_id = %s
-                      AND card_id = %s
-                      AND installment_group = %s
-                      AND billing_month >= %s
-                    """,
-                    (user_id, card["id"], group["installment_group"], month),
+                continue
+            future_row = future_by_group.get(key)
+            if future_row:
+                active_installments.append(
+                    {
+                        "title": future_row["title"],
+                        "installmentLabel": "\u00c0 frente",
+                        "remaining": int(future_row["future_count"]),
+                        "amount": round_money(future_row["amount"]),
+                    }
                 )
-                future_row = require_row(normalize_row(cursor.fetchone()), "Resumo de parcelas n\u00e3o encontrado.")
-                future_count = int(future_row["total"])
 
-                if future_count == 0:
-                    continue
-
-                cursor.execute(
-                    """
-                    SELECT title, amount
-                    FROM transactions
-                    WHERE user_id = %s
-                      AND card_id = %s
-                      AND installment_group = %s
-                    ORDER BY billing_month ASC
-                    LIMIT 1
-                    """,
-                    (user_id, card["id"], group["installment_group"]),
-                )
-                sample = normalize_row(cursor.fetchone())
-                if sample:
-                    active_installments.append(
-                        {
-                            "title": sample["title"],
-                            "installmentLabel": "\u00c0 frente",
-                            "remaining": future_count,
-                            "amount": round_money(sample["amount"]),
-                        }
-                    )
-
-            card["invoice"] = invoice
-            card["availableCredit"] = round_money(card["credit_limit"] - invoice)
-            commitment = get_card_commitment(user_id, int(card["id"]), month)
-            card["committedLimit"] = commitment["committedLimit"]
-            card["remainingInstallments"] = commitment["remainingInstallments"]
-            usage = (invoice / round_money(card["credit_limit"])) if round_money(card["credit_limit"]) > 0 else Decimal("0")
-            card["invoiceAlert"] = usage > Decimal("0.8")
-            card["activeInstallmentsCount"] = len(active_installments)
-            card["activeInstallments"] = active_installments
-            result.append(card)
+        card["invoice"] = invoice
+        card["availableCredit"] = round_money(card["credit_limit"] - invoice)
+        commitment = commitment_by_card.get(card_id, {"committedLimit": Decimal("0"), "remainingInstallments": 0})
+        card["committedLimit"] = commitment["committedLimit"]
+        card["remainingInstallments"] = commitment["remainingInstallments"]
+        usage = (invoice / round_money(card["credit_limit"])) if round_money(card["credit_limit"]) > 0 else Decimal("0")
+        card["invoiceAlert"] = usage > Decimal("0.8")
+        card["activeInstallmentsCount"] = len(active_installments)
+        card["activeInstallments"] = active_installments
+        result.append(card)
 
     return result
 
@@ -1563,7 +1622,42 @@ def get_card_pin_row(user_id: str, card_id: int) -> dict | None:
         return normalize_row(cursor.fetchone())
 
 
+def get_invoice_totals_by_card(user_id: str, month: str) -> dict[int, Decimal]:
+    """Fatura de todos os cartões do mês numa query só.
+
+    calculate_score e get_alerts_for_month somavam a fatura cartão a cartão
+    via get_invoice_total (uma query cada) — com N cartões, N queries em cada
+    função. Aqui é sempre 1 query batida por card_id, igual ao padrão já
+    usado em _compute_cards_summary.
+    """
+    return request_cached(
+        ("invoice_totals_by_card", user_id, month), lambda: _compute_invoice_totals_by_card(user_id, month)
+    )
+
+
+def _compute_invoice_totals_by_card(user_id: str, month: str) -> dict[int, Decimal]:
+    with db_cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT card_id, COALESCE(SUM(amount), 0) AS total
+            FROM transactions
+            WHERE user_id = %s
+              AND type = 'expense'
+              AND card_id IS NOT NULL
+              AND COALESCE(billing_month, substring(transaction_date from 1 for 7)) = %s
+            GROUP BY card_id
+            """,
+            (user_id, month),
+        )
+        rows = normalize_rows(cursor.fetchall())
+    return {int(row["card_id"]): round_money(row["total"]) for row in rows}
+
+
 def get_invoice_total(user_id: str, card_id: int, month: str) -> Decimal:
+    return request_cached(("invoice_total", user_id, card_id, month), lambda: _compute_invoice_total(user_id, card_id, month))
+
+
+def _compute_invoice_total(user_id: str, card_id: int, month: str) -> Decimal:
     with db_cursor() as cursor:
         cursor.execute(
             """
@@ -1624,32 +1718,40 @@ def simulate_card_invoices(
     months: int,
     category_id: int | None = None,
 ) -> list[dict]:
-    result: list[dict] = []
+    """PERF-06: uma query com GROUP BY para todos os meses simulados, em vez
+    de uma query por m\u00eas (at\u00e9 24 idas ao banco em simula\u00e7\u00f5es mais longas)."""
+    month_keys = [add_months(start_month, offset) for offset in range(months)]
     with db_cursor() as cursor:
-        for offset in range(months):
-            month_key = add_months(start_month, offset)
-            cursor.execute(
-                """
-                SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS installments_count
-                FROM transactions
-                WHERE user_id = %s
-                  AND card_id = %s
-                  AND type = 'expense'
-                  AND COALESCE(billing_month, substring(transaction_date from 1 for 7)) = %s
-                  AND (%s IS NULL OR category_id = %s)
-                """,
-                (user_id, card_id, month_key, category_id, category_id),
-            )
-            row = require_row(normalize_row(cursor.fetchone()), "Simula\u00e7\u00e3o de fatura n\u00e3o encontrada.")
-            result.append(
-                {
-                    "month": month_key,
-                    "projected_total": round_money(row["total"]),
-                    "projectedTotal": round_money(row["total"]),
-                    "installments_count": int(row["installments_count"]),
-                    "itemsCount": int(row["installments_count"]),
-                }
-            )
+        cursor.execute(
+            """
+            SELECT COALESCE(billing_month, substring(transaction_date from 1 for 7)) AS month_key,
+                   COALESCE(SUM(amount), 0) AS total, COUNT(*) AS installments_count
+            FROM transactions
+            WHERE user_id = %s
+              AND card_id = %s
+              AND type = 'expense'
+              AND COALESCE(billing_month, substring(transaction_date from 1 for 7)) = ANY(%s)
+              AND (%s IS NULL OR category_id = %s)
+            GROUP BY month_key
+            """,
+            (user_id, card_id, month_keys, category_id, category_id),
+        )
+        totals_by_month = {row["month_key"]: row for row in normalize_rows(cursor.fetchall())}
+
+    result: list[dict] = []
+    for month_key in month_keys:
+        row = totals_by_month.get(month_key)
+        total = round_money(row["total"]) if row else Decimal("0")
+        count = int(row["installments_count"]) if row else 0
+        result.append(
+            {
+                "month": month_key,
+                "projected_total": total,
+                "projectedTotal": total,
+                "installments_count": count,
+                "itemsCount": count,
+            }
+        )
     return result
 
 
@@ -2577,6 +2679,10 @@ def get_score_label(score: int) -> dict:
 
 
 def calculate_score(user_id: str, month: str) -> dict:
+    return request_cached(("score", user_id, month), lambda: _compute_score(user_id, month))
+
+
+def _compute_score(user_id: str, month: str) -> dict:
     user_settings = get_settings(user_id)
     monthly_income = round_money(user_settings["monthly_income"] or 0)
     totals = get_month_totals(user_id, month)
@@ -2633,11 +2739,12 @@ def calculate_score(user_id: str, month: str) -> dict:
     if total_reserva > 0 and monthly_income > 0:
         breakdown["reservas"] = min(100, int((total_reserva / monthly_income) * Decimal("200")))
 
+    invoice_totals = get_invoice_totals_by_card(user_id, month)
     for card in list_cards(user_id):
         credit_limit = round_money(card["credit_limit"] or 0)
         if credit_limit <= 0:
             continue
-        uso_pct = get_invoice_total(user_id, int(card["id"]), month) / credit_limit
+        uso_pct = invoice_totals.get(int(card["id"]), Decimal("0")) / credit_limit
         if uso_pct > Decimal("0.9"):
             breakdown["cartões"] -= 80
         elif uso_pct > Decimal("0.7"):
@@ -2662,11 +2769,12 @@ def get_alerts_for_month(user_id: str, month: str) -> list[dict]:
     totals = get_month_totals(user_id, month)
     alerts: list[dict] = []
 
+    invoice_totals = get_invoice_totals_by_card(user_id, month)
     for card in list_cards(user_id):
         credit_limit = round_money(card["credit_limit"] or 0)
         if credit_limit <= 0:
             continue
-        invoice = get_invoice_total(user_id, int(card["id"]), month)
+        invoice = invoice_totals.get(int(card["id"]), Decimal("0"))
         usage = invoice / credit_limit
         if usage > Decimal("0.8"):
             usage_percent = int((usage * Decimal("100")).to_integral_value(rounding=ROUND_HALF_UP))
