@@ -164,6 +164,13 @@ export type TransactionFilters = {
   source?: string;
   cardId?: number | "";
   search?: string;
+  limit?: number;
+  offset?: number;
+};
+
+export type TransactionPage = {
+  items: Transaction[];
+  hasMore: boolean;
 };
 
 export type OAuthProviderKey = "google" | "github" | "facebook";
@@ -346,7 +353,7 @@ export const api = {
     return request<{ deleted: boolean; archived: boolean; linkedTransactions: number }>(`/api/categories/${id}`, { method: "DELETE", token });
   },
   transactions(token: string, filters: TransactionFilters) {
-    return request<Transaction[]>(withQuery("/api/transactions", filters), { token });
+    return request<TransactionPage>(withQuery("/api/transactions", filters), { token });
   },
   transaction(token: string, payload: {
     title: string;

@@ -2,23 +2,58 @@
 
 ## Vercel (deploy primário)
 
-Projeto único unificado: o frontend Next é servido como estático pela CDN da
-Vercel e o FastAPI roda como **Python Serverless Function** (`api/index.py`), na
-**mesma origem** — o cookie de sessão funciona sem CORS. Config em `vercel.json`.
+Projeto único unificado via **Services** (recurso em beta da Vercel — veja o
+aviso abaixo): o frontend Next é o serviço `frontend` (estático, `output:
+"export"`) e o FastAPI é o serviço `api` (Python, `api/index.py`), na
+**mesma origem** — o cookie de sessão funciona sem CORS. Config em
+`vercel.json`; ambos os serviços fazem deploy juntos, roteados por `rewrites`
+no nível raiz do arquivo.
+
+### BP-08 (OPS-01/CI-03): migrations rodam no build, não a cada cold start
+
+Antes, `ensure_serverless_schema` aplicava as migrations no primeiro request
+de cada instância fria — em serverless isso significava reexecutar DDL
+(incluindo um `DROP CONSTRAINT`+`ADD CONSTRAINT` que trava `transactions`
+inteira) toda vez que uma instância nova acordava. Agora o serviço `api` tem
+`"buildCommand": "python migrate.py"`: as migrations aplicam uma vez, no
+build, antes do deploy ficar no ar. Em runtime, `ensure_serverless_schema`
+só VERIFICA se o schema está em dia (`SELECT` em `schema_migrations`) e
+loga um `WARNING` se houver migration pendente — nunca aplica DDL. Isso é
+uma rede de segurança: mesmo que o `buildCommand` falhe silenciosamente por
+algum motivo, o pior caso é esse warning no log, não uma aplicação de DDL
+inesperada numa instância servindo tráfego.
+
+`DATABASE_URL` precisa estar disponível como variável de ambiente **no
+build** do serviço `api` (não só em runtime) para `python migrate.py`
+conseguir rodar — variáveis de ambiente de Production/Preview do projeto já
+ficam disponíveis nas duas fases por padrão na Vercel, mas confirme isso ao
+configurar o projeto (ver Environment Variables abaixo).
+
+### ⚠️ Services é beta — valide num Preview antes de promover
+
+O modelo `services` em `vercel.json` (múltiplos serviços num projeto único)
+está em beta em todos os planos da Vercel no momento desta migração
+(BP-08). Ele substitui o `builds`/`routes` legado que este projeto usava
+antes — **teste um deploy de Preview** (PR aberto → Vercel gera preview
+automaticamente) e confirme os itens de Pós-deploy abaixo antes de mesclar
+para produção. Se o comportamento do Preview divergir do esperado, o
+`vercel.json` anterior (`builds`/`routes`, sem build-time migration) está no
+histórico do Git — `git show <commit-anterior>:vercel.json` recupera a
+versão que funcionava, com `ensure_serverless_schema` verify-only já
+resolvendo o problema mais urgente (OPS-01) mesmo sem o `buildCommand`.
 
 ### Pré-requisitos
-- Banco no Supabase já provisionado (schema aplicado).
-- **Aplicar a migration nova** `0008_lgpd.sql` (tabela `consents`): rode
-  `python migrate.py` com `DATABASE_URL` de produção, ou cole o SQL no Supabase
-  SQL Editor.
+- Banco no Supabase já provisionado (schema aplicado) — `python migrate.py`
+  no build cuida de manter o schema em dia a partir daqui.
 - **Criar bucket privado** `avatars` no Supabase Storage (Storage → New bucket,
   desmarque "Public").
 
 ### Import na Vercel
 1. Vercel → Add New → Project → importe o repositório do GitHub.
-2. Framework Preset: **Other** (o `vercel.json` controla os dois builds).
-   Deixe Root Directory na raiz do repo.
-3. Environment Variables:
+2. Framework Preset: deixado para o `vercel.json` (modelo `services` — não
+   defina um preset manualmente no dashboard). Deixe Root Directory na raiz
+   do repo.
+3. Environment Variables (aplicam-se a build e runtime dos dois serviços):
 
 | Variável | Valor |
 |----------|-------|
@@ -36,6 +71,8 @@ Vercel e o FastAPI roda como **Python Serverless Function** (`api/index.py`), na
    e storage no Supabase.
 
 ### Pós-deploy
+- Nos logs de build do serviço `api`, confirme que `python migrate.py` rodou
+  e terminou sem erro (procure por "Migrações aplicadas com sucesso").
 - `GET /api/health/live` → `{"ok": true}` (liveness).
 - `GET /api/health` → `{"ok": true, "db": "connected"}` (readiness com DB).
 - Cadastro (com aceite) → login → transação → upload de avatar → exportar dados →

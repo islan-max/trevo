@@ -97,7 +97,7 @@ from app.shared.money import (
     round_money,
     to_decimal,
 )
-from migrate import run_migrations, run_migrations_locked
+from migrate import pending_migrations, run_migrations
 
 load_dotenv()
 
@@ -200,23 +200,23 @@ login_failures: dict[str, dict[str, Any]] = {}
 revoked_token_hashes: set[str] = set()
 startup_time = time.time()
 
-DEFAULT_CATEGORIES: list[tuple[str, str, str, str, int]] = [
-    ("Sal\u00e1rio", "income", "#2E9D5B", "\U0001f4bc", 1),
-    ("Freelance", "income", "#4FB877", "\U0001f9e0", 1),
-    ("Investimentos", "income", "#7FD199", "\U0001f4c8", 1),
-    ("Moradia", "expense", "#D9A441", "\U0001f3e0", 1),
-    ("Alimenta\u00e7\u00e3o", "expense", "#E4884A", "\U0001f37d\ufe0f", 1),
-    ("Mercado", "expense", "#C97B9E", "\U0001f6d2", 1),
-    ("Transporte", "expense", "#4E8FBF", "\U0001f68c", 1),
-    ("Sa\u00fade", "expense", "#D1495B", "\U0001f48a", 1),
-    ("Educa\u00e7\u00e3o", "expense", "#8B7BC4", "\U0001f4da", 1),
-    ("Assinaturas", "expense", "#4CA9A0", "\U0001f4fa", 1),
-    ("Lazer", "expense", "#E0658A", "\U0001f3ae", 1),
-    ("Contas", "expense", "#7A8B99", "\U0001f4a1", 1),
-    ("Reserva", "expense", "#1F8049", "\U0001f4b0", 1),
-    ("Pets", "expense", "#B08968", "\U0001f436", 1),
-    ("Presentes", "expense", "#E07A5F", "\U0001f381", 1),
-    ("Outros", "expense", "#96A5A0", "\U0001f4cc", 1),
+DEFAULT_CATEGORIES: list[tuple[str, str, str, str, int, str]] = [
+    ("Sal\u00e1rio", "income", "#2E9D5B", "\U0001f4bc", 1, "income"),
+    ("Freelance", "income", "#4FB877", "\U0001f9e0", 1, "income"),
+    ("Investimentos", "income", "#7FD199", "\U0001f4c8", 1, "investment"),
+    ("Moradia", "expense", "#D9A441", "\U0001f3e0", 1, "other"),
+    ("Alimenta\u00e7\u00e3o", "expense", "#E4884A", "\U0001f37d\ufe0f", 1, "other"),
+    ("Mercado", "expense", "#C97B9E", "\U0001f6d2", 1, "other"),
+    ("Transporte", "expense", "#4E8FBF", "\U0001f68c", 1, "other"),
+    ("Sa\u00fade", "expense", "#D1495B", "\U0001f48a", 1, "other"),
+    ("Educa\u00e7\u00e3o", "expense", "#8B7BC4", "\U0001f4da", 1, "other"),
+    ("Assinaturas", "expense", "#4CA9A0", "\U0001f4fa", 1, "other"),
+    ("Lazer", "expense", "#E0658A", "\U0001f3ae", 1, "other"),
+    ("Contas", "expense", "#7A8B99", "\U0001f4a1", 1, "other"),
+    ("Reserva", "expense", "#1F8049", "\U0001f4b0", 1, "reserve"),
+    ("Pets", "expense", "#B08968", "\U0001f436", 1, "other"),
+    ("Presentes", "expense", "#E07A5F", "\U0001f381", 1, "other"),
+    ("Outros", "expense", "#96A5A0", "\U0001f4cc", 1, "other"),
 ]
 
 
@@ -307,10 +307,12 @@ def request_cached(key: tuple, factory):
     return cache[key]
 
 
-# Em serverless o startup não roda migrations (um banco fora do ar derrubaria o
-# cold start inteiro) e o build da Vercel também não as roda — o schema ficava
-# congelado no que existisse. Aqui elas rodam uma vez por processo, sob advisory
-# lock e sem poder derrubar a request se falharem.
+# OPS-01/CI-03: em serverless, ensure_serverless_schema já aplicou migrations
+# a cada cold start — incluindo DDL não-idempotente em custo (um DROP+ADD
+# CONSTRAINT que toma ACCESS EXCLUSIVE em transactions), serializada por
+# advisory lock entre instâncias concorrentes. Migrations agora rodam uma vez
+# no build da Vercel (buildCommand em vercel.json chama `python migrate.py`);
+# aqui só se VERIFICA se o banco está em dia, sem aplicar nada.
 _schema_checked = False
 
 
@@ -318,13 +320,16 @@ def ensure_serverless_schema() -> None:
     global _schema_checked
     if _schema_checked or not settings.is_serverless:
         return
-    _schema_checked = True  # uma tentativa por processo, mesmo se falhar
+    _schema_checked = True  # uma checagem por processo, mesmo se falhar
     try:
         with connection() as conn:
-            run_migrations_locked(conn)
-        logger.info("Serverless schema check completed")
+            pending = pending_migrations(conn)
+        if pending:
+            logger.warning("Migrations pendentes no banco: %s. Rode `python migrate.py` no deploy.", pending)
+        else:
+            logger.info("Schema em dia.")
     except Exception:
-        logger.exception("Serverless migration check failed; serving anyway")
+        logger.exception("Falha ao verificar o schema; servindo assim mesmo")
 
 
 @app.middleware("http")
@@ -1197,11 +1202,14 @@ def ensure_user_defaults_for_cursor(cursor, user_id: str) -> None:
     )
     cursor.executemany(
         """
-        INSERT INTO categories (user_id, name, type, color, icon, is_default)
-        VALUES (%s, %s, %s, %s, %s, %s)
+        INSERT INTO categories (user_id, name, type, color, icon, is_default, role)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (user_id, name) DO NOTHING
         """,
-        [(user_id, name, type_name, color, icon, is_default) for name, type_name, color, icon, is_default in DEFAULT_CATEGORIES],
+        [
+            (user_id, name, type_name, color, icon, is_default, role)
+            for name, type_name, color, icon, is_default, role in DEFAULT_CATEGORIES
+        ],
     )
 
 
@@ -1395,7 +1403,16 @@ def list_transactions(
     source: str | None = None,
     card_id: int | None = None,
     search: str | None = None,
-) -> list[dict]:
+    limit: int = 250,
+    offset: int = 0,
+) -> tuple[list[dict], bool]:
+    """Retorna (linhas da página, há mais depois dela).
+
+    DB-08: sem paginação, a lista inteira do filtro vinha truncada num
+    LIMIT 250 fixo, sem indicar ao cliente que havia mais linhas. Pede
+    limit + 1 para saber se há próxima página sem uma segunda query de
+    COUNT(*).
+    """
     pattern = f"%{search}%" if search else None
     query = """
         SELECT t.*, c.name AS category_name, c.color AS category_color, cards.name AS card_name
@@ -1415,7 +1432,7 @@ def list_transactions(
             OR lower(COALESCE(t.raw_description, '')) LIKE lower(%s)
           )
         ORDER BY t.transaction_date DESC, t.id DESC
-        LIMIT 250
+        LIMIT %s OFFSET %s
     """
     params = (
         user_id,
@@ -1434,11 +1451,16 @@ def list_transactions(
         pattern,
         pattern,
         pattern,
+        limit + 1,
+        offset,
     )
 
     with db_cursor() as cursor:
         cursor.execute(query, params)
-        return normalize_rows(cursor.fetchall())
+        rows = normalize_rows(cursor.fetchall())
+
+    has_more = len(rows) > limit
+    return rows[:limit], has_more
 
 
 def get_cards_summary(user_id: str, month: str) -> list[dict]:
@@ -2728,7 +2750,7 @@ def _compute_score(user_id: str, month: str) -> dict:
             FROM transactions t
             JOIN categories c ON c.id = t.category_id AND c.user_id = t.user_id
             WHERE t.user_id = %s
-              AND lower(c.name) IN ('reserva', 'investimentos')
+              AND c.role IN ('reserve', 'investment')
               AND COALESCE(t.billing_month, substring(t.transaction_date from 1 for 7)) = %s
             """,
             (user_id, month),
@@ -3978,7 +4000,7 @@ def bootstrap(month: str | None = None, current_user: dict = Depends(get_current
         "settings": get_settings(user_id),
         "categories": list_categories(user_id),
         "cards": get_cards_summary(user_id, month_key),
-        "transactions": list_transactions(user_id, month_key),
+        "transactions": list_transactions(user_id, month_key)[0],
         "dashboard": get_dashboard(user_id, month_key),
         "budget": get_budget_summary(user_id, month_key),
         "score": score,
@@ -4016,12 +4038,14 @@ def transactions(
     source: Literal["manual", "csv_import", "open_finance_future"] | None = None,
     cardId: int | None = Query(default=None, ge=1),
     search: str | None = Query(default=None, max_length=120),
+    limit: int = Query(default=250, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     current_user: dict = Depends(get_current_user),
-) -> list[dict]:
+) -> dict:
     month_key = validate_month_text(month) if month else None
     payment_method = clean_text(paymentMethod, "Forma de pagamento", 50, required=False) if paymentMethod else None
     search_text = clean_text(search, "Busca", 120, required=False) if search else None
-    return list_transactions(
+    items, has_more = list_transactions(
         current_user["id"],
         month_key,
         type,
@@ -4030,7 +4054,10 @@ def transactions(
         source,
         cardId,
         search_text,
+        limit,
+        offset,
     )
+    return {"items": items, "hasMore": has_more}
 
 
 @app.post("/api/imports/csv/upload")

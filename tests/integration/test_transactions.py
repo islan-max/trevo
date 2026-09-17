@@ -29,6 +29,56 @@ async def test_create_and_delete_transaction(client, auth_headers):
 
 
 @pytest.mark.asyncio
+async def test_transactions_list_is_paginated(client, auth_headers):
+    """DB-08: a lista vinha truncada num LIMIT 250 fixo, sem indicar ao
+    cliente que havia mais linhas. Agora aceita limit/offset e devolve
+    hasMore, sem lacunas nem repetição entre páginas."""
+    for index in range(5):
+        payload = {
+            "title": f"Item {index}",
+            "amount": 10 + index,
+            "type": "expense",
+            "categoryId": None,
+            "paymentMethod": "pix",
+            "transactionDate": "2026-09-10",
+            "notes": "",
+            "cardId": None,
+            "billingMonth": None,
+            "isRecurring": False,
+        }
+        response = await client.post("/api/transactions", headers=auth_headers, json=payload)
+        assert response.status_code == 200, response.text
+
+    first_page = await client.get(
+        "/api/transactions", headers=auth_headers, params={"month": "2026-09", "limit": 2, "offset": 0}
+    )
+    assert first_page.status_code == 200, first_page.text
+    first_body = first_page.json()
+    assert len(first_body["items"]) == 2
+    assert first_body["hasMore"] is True
+
+    second_page = await client.get(
+        "/api/transactions", headers=auth_headers, params={"month": "2026-09", "limit": 2, "offset": 2}
+    )
+    second_body = second_page.json()
+    assert len(second_body["items"]) == 2
+    assert second_body["hasMore"] is True
+
+    third_page = await client.get(
+        "/api/transactions", headers=auth_headers, params={"month": "2026-09", "limit": 2, "offset": 4}
+    )
+    third_body = third_page.json()
+    assert len(third_body["items"]) == 1
+    assert third_body["hasMore"] is False
+
+    first_ids = {row["id"] for row in first_body["items"]}
+    second_ids = {row["id"] for row in second_body["items"]}
+    third_ids = {row["id"] for row in third_body["items"]}
+    assert not (first_ids & second_ids)
+    assert not (second_ids & third_ids)
+
+
+@pytest.mark.asyncio
 async def test_delete_installment_requires_group_scope_confirmation(client, auth_headers):
     """FIN-10: apagar uma parcela apagava o grupo inteiro sem aviso prévio —
     agora exige ?scope=group, e sem ele responde 409 com a contagem."""
@@ -76,7 +126,7 @@ async def test_delete_installment_requires_group_scope_confirmation(client, auth
     remaining = await client.get(
         "/api/transactions", headers=auth_headers, params={"month": "2026-09"}
     )
-    assert all(row["installment_group"] is None for row in remaining.json())
+    assert all(row["installment_group"] is None for row in remaining.json()["items"])
 
 
 @pytest.mark.asyncio
