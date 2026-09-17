@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class CsvColumnMapping(BaseModel):
@@ -16,16 +16,14 @@ class CsvColumnMapping(BaseModel):
     account: str | None = Field(default=None, max_length=120)
     time: str | None = Field(default=None, max_length=120)
 
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(extra="forbid")
 
 
 class CsvImportPreviewPayload(BaseModel):
     importToken: str = Field(..., min_length=16, max_length=200)
     mapping: CsvColumnMapping
 
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(extra="forbid")
 
 
 class CsvImportConfirmPayload(CsvImportPreviewPayload):

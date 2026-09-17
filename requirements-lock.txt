@@ -110,6 +110,7 @@ pycparser==3.0
     # via cffi
 pydantic==2.13.4
     # via
+    #   -r requirements.txt
     #   fastapi
     #   postgrest
     #   pyiceberg

@@ -2,14 +2,13 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class PinPayload(BaseModel):
     pin: str = Field(..., min_length=4, max_length=6)
 
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(extra="forbid")
 
 
 class CardPayload(BaseModel):
@@ -21,8 +20,7 @@ class CardPayload(BaseModel):
     dueDay: int = Field(..., ge=1, le=31)
     color: str = Field(default="#171717", min_length=1, max_length=20)
 
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(extra="forbid")
 
 
 class CardUpdatePayload(BaseModel):
@@ -34,8 +32,7 @@ class CardUpdatePayload(BaseModel):
     dueDay: int | None = Field(default=None, ge=1, le=31)
     color: str | None = Field(default=None, min_length=1, max_length=20)
 
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(extra="forbid")
 
 
 class InstallmentPayload(BaseModel):
@@ -46,8 +43,7 @@ class InstallmentPayload(BaseModel):
     purchaseDate: str = Field(..., min_length=10, max_length=10)
     notes: str = Field(default="", max_length=1000)
 
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(extra="forbid")
 
 
 class PurchaseSimulationPayload(BaseModel):
@@ -56,5 +52,4 @@ class PurchaseSimulationPayload(BaseModel):
     purchaseDate: str = Field(..., min_length=10, max_length=10)
     months: int = Field(default=12, ge=1, le=24)
 
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(extra="forbid")

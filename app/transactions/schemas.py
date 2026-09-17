@@ -3,7 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class TransactionPayload(BaseModel):
@@ -20,8 +20,7 @@ class TransactionPayload(BaseModel):
     recurrenceType: Literal["monthly", "weekly"] | None = None
     recurrenceDay: int | None = Field(default=None, ge=0, le=31)
 
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(extra="forbid")
 
 
 class TransactionUpdatePayload(BaseModel):
@@ -35,8 +34,7 @@ class TransactionUpdatePayload(BaseModel):
     cardId: int | None = Field(default=None, ge=1)
     billingMonth: str | None = Field(default=None, min_length=7, max_length=7)
 
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(extra="forbid")
 
 
 class RecurringPayload(BaseModel):
@@ -44,8 +42,7 @@ class RecurringPayload(BaseModel):
     recurrence_type: Literal["monthly", "weekly"] | None = None
     recurrence_day: int | None = Field(default=None, ge=0, le=31)
 
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(extra="forbid")
 
 
 class InstallmentSimulationPayload(BaseModel):
@@ -55,8 +52,7 @@ class InstallmentSimulationPayload(BaseModel):
     purchaseDate: str = Field(..., min_length=10, max_length=10)
     months: int = Field(default=12, ge=1, le=24)
 
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(extra="forbid")
 
 
 class InstallmentWithoutCardPayload(BaseModel):
@@ -68,5 +64,4 @@ class InstallmentWithoutCardPayload(BaseModel):
     purchaseDate: str = Field(..., min_length=10, max_length=10)
     notes: str = Field(default="", max_length=1000)
 
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(extra="forbid")

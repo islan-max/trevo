@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class SettingsPayload(BaseModel):
@@ -12,5 +12,4 @@ class SettingsPayload(BaseModel):
     reserveGoalAmount: Decimal | None = Field(default=None, ge=0, le=999999999)
     reserveCurrentAmount: Decimal | None = Field(default=None, ge=0, le=999999999)
 
-    class Config:
-        extra = "forbid"
+    model_config = ConfigDict(extra="forbid")
