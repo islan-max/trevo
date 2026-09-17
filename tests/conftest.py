@@ -19,6 +19,28 @@ TEST_DB_URL = os.getenv("TEST_DATABASE_URL")
 requires_db = pytest.mark.skipif(not TEST_DB_URL, reason="TEST_DATABASE_URL is not configured")
 
 
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """CI-01: com banco de teste disponível, nenhum teste deveria pular.
+
+    Antes, o CI reexecutava a suíte inteira (até 3x) só para grepar "SKIPPED"
+    na saída. Esse hook faz a mesma checagem numa única execução: se
+    TEST_DATABASE_URL está definida e algo pulou mesmo assim, é configuração
+    quebrada, não decisão — a suíte deve falhar. Sem TEST_DATABASE_URL
+    (desenvolvimento local sem banco), os testes de integração pulam de
+    propósito e isso continua não sendo erro.
+    """
+    if not TEST_DB_URL:
+        return
+    terminalreporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    skipped_reports = terminalreporter.stats.get("skipped", []) if terminalreporter else []
+    if not skipped_reports:
+        return
+    session.exitstatus = 1
+    print(f"\n::error::{len(skipped_reports)} teste(s) pulado(s) com banco de teste disponível")
+    for report in skipped_reports:
+        print(f"::error::SKIPPED {report.nodeid}: {report.longrepr}")
+
+
 def pytest_report_header(config):
     """Deixa explicito, no topo da saida, que a integracao nao vai rodar.
 
