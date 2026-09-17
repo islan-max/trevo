@@ -23,7 +23,9 @@ from app.core.config import settings
 
 logger = logging.getLogger("trevo.signing")
 
-JWT_SECRET_NAME = "jwt_secret_key"
+# Nome da chave em app_secrets, não um segredo — falso positivo do bandit
+# (B105 casa qualquer string com "secret"/"password" no nome da variável).
+JWT_SECRET_NAME = "jwt_secret_key"  # nosec B105
 MIN_SECRET_LENGTH = 32
 
 # Cache de processo: evita ir ao banco a cada assinatura de token.
