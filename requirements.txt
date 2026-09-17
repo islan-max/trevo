@@ -18,6 +18,13 @@ pyjwt>=2.9,<3
 # meio, nada mais impõe esse teto.
 bcrypt>=4.0
 python-multipart>=0.0.9
+# DEP-08: substitui o gerador de PDF escrito à mão em app/reports/pdf.py
+# (bytes de objeto, xref e operadores de desenho montados manualmente — a
+# quebra de linha, por exemplo, contava caracteres em vez de largura real de
+# fonte). Único texto ainda não suportado pela fonte core Helvetica são os
+# caracteres do cp1252 fora do latin-1 puro (reticências, travessão);
+# nenhum deles aparece nos textos fixos do relatório.
+fpdf2>=2.8,<3
 slowapi>=0.1.9
 python-dotenv>=1.0
 httpx>=0.27
