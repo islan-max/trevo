@@ -4,7 +4,10 @@ fastapi>=0.110
 pydantic>=2.9,<3
 uvicorn[standard]>=0.27
 psycopg2-binary>=2.9
-supabase>=2.0
+# DEP-07: supabase-py removido — trazia postgrest/gotrue/realtime inteiros
+# só para 3 métodos de Storage (upload/create_signed_url/remove), hoje
+# chamados direto pela API REST em app/core/storage.py. httpx (já uma
+# dependência direta) é só o que sobrou disso.
 # DEP-06: PyJWT no lugar de python-jose (sem commits desde 2021, changelog
 # de segurança parado). app/api/deps.py, app/oauth.py e app/core/security.py
 # usam só HS256, então nenhuma extra de criptografia assimétrica é necessária.

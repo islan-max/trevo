@@ -20,29 +20,42 @@ import logging
 import secrets
 from pathlib import Path
 
+import httpx
+
 from app.core.config import settings
 
 logger = logging.getLogger("trevo.storage")
 
 SUPABASE_REF_PREFIX = "supabase://"
 SIGNED_URL_TTL_SECONDS = 60 * 60
+STORAGE_REQUEST_TIMEOUT = 20
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 PROFILE_PHOTO_DIR = BASE_DIR / "data" / "profile-photos"
 PROFILE_PHOTO_URL_PREFIX = "/media/profile-photos"
 
-_client = None
+_client: httpx.Client | None = None
 
 
-def _supabase_client():
+def _storage_base_url() -> str:
+    return f"{settings.effective_supabase_url.rstrip('/')}/storage/v1"
+
+
+def _storage_client() -> httpx.Client:
+    # DEP-07: o SDK supabase-py trazia postgrest/gotrue/realtime inteiros só
+    # para os 3 métodos de Storage usados aqui (upload/create_signed_url/
+    # remove) — chamado direto pela API REST do Storage, documentada em
+    # https://supabase.com/docs/reference/self-hosting-storage/introduction.
+    # apiKey e Authorization: Bearer <chave> são o que supabase-py também
+    # mandava (storage3._sync.client.SyncStorageClient._get_auth_headers).
     global _client
     if _client is not None:
         return _client
-    from supabase import create_client  # lazy import; heavy and optional
-
-    _client = create_client(
-        settings.effective_supabase_url,
-        settings.effective_supabase_service_role_key,
+    key = settings.effective_supabase_service_role_key
+    _client = httpx.Client(
+        base_url=_storage_base_url(),
+        headers={"apiKey": key, "Authorization": f"Bearer {key}"},
+        timeout=STORAGE_REQUEST_TIMEOUT,
     )
     return _client
 
@@ -56,11 +69,12 @@ def store_avatar(user_id: str, content: bytes, extension: str, content_type: str
     if settings.supabase_configured:
         path = f"{user_id}/{secrets.token_hex(8)}.{extension}"
         bucket = settings.effective_avatars_bucket
-        _supabase_client().storage.from_(bucket).upload(
-            path,
-            content,
-            {"content-type": content_type, "upsert": "true"},
+        response = _storage_client().post(
+            f"/object/{bucket}/{path}",
+            headers={"cache-control": "3600", "x-upsert": "true"},
+            files={"file": (path.rsplit("/", 1)[-1], content, content_type)},
         )
+        response.raise_for_status()
         return f"{SUPABASE_REF_PREFIX}{path}"
 
     PROFILE_PHOTO_DIR.mkdir(parents=True, exist_ok=True)
@@ -86,8 +100,13 @@ def resolve_avatar_url(ref: str | None) -> str | None:
         path = ref[len(SUPABASE_REF_PREFIX):]
         try:
             bucket = settings.effective_avatars_bucket
-            result = _supabase_client().storage.from_(bucket).create_signed_url(path, SIGNED_URL_TTL_SECONDS)
-            return result.get("signedURL") or result.get("signedUrl") or result.get("signed_url")
+            response = _storage_client().post(
+                f"/object/sign/{bucket}/{path}",
+                json={"expiresIn": str(SIGNED_URL_TTL_SECONDS)},
+            )
+            response.raise_for_status()
+            signed_path = response.json()["signedURL"]
+            return f"{_storage_base_url()}{signed_path}"
         except Exception:
             logger.exception("Failed to sign avatar URL")
             return None
@@ -108,7 +127,8 @@ def remove_avatar(ref: str | None) -> bool:
         if ref.startswith(SUPABASE_REF_PREFIX):
             path = ref[len(SUPABASE_REF_PREFIX):]
             bucket = settings.effective_avatars_bucket
-            _supabase_client().storage.from_(bucket).remove([path])
+            response = _storage_client().request("DELETE", f"/object/{bucket}", json={"prefixes": [path]})
+            response.raise_for_status()
             return True
         if ref.startswith(PROFILE_PHOTO_URL_PREFIX):
             filename = ref.rsplit("/", 1)[-1]
