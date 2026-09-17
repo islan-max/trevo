@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
 from app.shared.clock import current_month as _current_month
 
@@ -43,6 +44,27 @@ def get_month_range(month_key: str) -> tuple[str, str]:
     start = date(year, month, 1)
     end = date(next_year, next_month, 1) - timedelta(days=1)
     return start.isoformat(), end.isoformat()
+
+
+def as_utc_datetime(value: Any) -> datetime | None:
+    """Normaliza para datetime em UTC, aceitando também texto ISO-8601.
+
+    As linhas passam por ``normalize_row``, que serializa datetime como string
+    ISO. Sem aceitar esse formato aqui, a função devolvia ``None`` para toda
+    coluna vinda do banco e as checagens que dependem dela eram silenciosamente
+    puladas: o token continuava válido após troca de senha e o bloqueio por
+    tentativas de login nunca era aplicado.
+    """
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def first_billing_month(purchase_date: str, closing_day: int | None) -> str:

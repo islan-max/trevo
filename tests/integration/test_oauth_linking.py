@@ -15,7 +15,7 @@ import uuid
 import pytest
 from fastapi import HTTPException
 
-from app.main import get_user_by_email, link_oauth_identity_to_user, resolve_oauth_user
+from app.auth.service import get_user_by_email, link_oauth_identity_to_user, resolve_oauth_user
 from tests.conftest import TEST_DB_URL, register_user
 
 pytestmark = pytest.mark.skipif(not TEST_DB_URL, reason="TEST_DATABASE_URL is not configured")

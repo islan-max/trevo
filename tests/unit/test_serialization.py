@@ -6,8 +6,21 @@ from decimal import Decimal
 from fastapi import FastAPI
 from fastapi.encoders import jsonable_encoder
 
-import app.main as main_module  # noqa: F401  (aplica o encoder de Decimal ao importar)
-from app.main import as_utc_datetime, normalize_row
+import app.main as main_module
+from app.api.deps import PlainDictRoute
+from app.shared.dates import as_utc_datetime
+from app.shared.serialization import normalize_row
+
+
+def _flat_routes(app: FastAPI) -> list:
+    """app.routes pode conter _IncludedRouter (roteamento preguiçoso do
+    FastAPI moderno para routers incluídos via include_router) em vez da
+    rota em si — original_router.routes tem a lista de verdade."""
+    routes: list = []
+    for route in app.routes:
+        original_router = getattr(route, "original_router", None)
+        routes.extend(original_router.routes if original_router is not None else [route])
+    return routes
 
 
 def test_decimal_serializa_como_numero():
@@ -58,7 +71,7 @@ def test_rota_anotada_devolve_dinheiro_como_numero():
     from fastapi.testclient import TestClient
 
     app = FastAPI()
-    app.router.route_class = main_module.PlainDictRoute
+    app.router.route_class = PlainDictRoute
 
     @app.get("/valor")
     def valor() -> dict:
@@ -80,6 +93,6 @@ def test_rota_anotada_devolve_dinheiro_como_numero():
 
 def test_rotas_do_app_usam_a_route_class_sem_response_model():
     """Garante que nenhuma rota volte a herdar response_model da anotação."""
-    monetarias = [r for r in main_module.app.routes if getattr(r, "path", "").startswith("/api/")]
+    monetarias = [r for r in _flat_routes(main_module.app) if getattr(r, "path", "").startswith("/api/")]
     assert monetarias, "nenhuma rota /api/ encontrada"
     assert all(getattr(r, "response_model", None) is None for r in monetarias)
