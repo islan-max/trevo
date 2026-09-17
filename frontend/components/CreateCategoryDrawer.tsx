@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useId, useRef, useState } from "react";
 import { X, Plus } from "@/components/icons";
+import { Dialog } from "@/components/Dialog";
 import { useDelayedPresence } from "@/lib/useDelayedPresence";
 import type { Category, TransactionType } from "@/types/finance";
 
@@ -50,6 +51,8 @@ export function CreateCategoryDrawer({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const { shouldRender, state } = useDelayedPresence(open, 180);
+  const titleId = useId();
+  const nameInputRef = useRef<HTMLInputElement | null>(null);
 
   if (!shouldRender) return null;
 
@@ -82,9 +85,16 @@ export function CreateCategoryDrawer({
       />
 
       {/* Modal */}
-      <div className={`theme-surface relative mx-4 w-full max-w-md rounded-app border p-6 shadow-lift ${state === "open" ? "animate-pop-in" : "animate-pop-out"}`}>
+      <Dialog
+        busy={loading}
+        className={`theme-surface relative mx-4 w-full max-w-md rounded-app border p-6 shadow-lift ${state === "open" ? "animate-pop-in" : "animate-pop-out"}`}
+        initialFocusRef={nameInputRef}
+        onClose={onClose}
+        open={open}
+        titleId={titleId}
+      >
         <div className="flex items-center justify-between gap-4 mb-4">
-          <h2 className="text-lg font-bold">Criar categoria</h2>
+          <h2 className="text-lg font-bold" id={titleId}>Criar categoria</h2>
           <button
             type="button"
             onClick={onClose}
@@ -105,7 +115,7 @@ export function CreateCategoryDrawer({
               onChange={(e) => setForm({ ...form, name: e.target.value })}
               placeholder="Ex: Alimentação, Transporte"
               disabled={loading}
-              autoFocus
+              ref={nameInputRef}
             />
           </label>
 
@@ -176,7 +186,7 @@ export function CreateCategoryDrawer({
           </label>
 
           {error && (
-            <p className="feedback-message text-sm text-danger bg-danger/10 p-3 rounded-app">
+            <p aria-live="assertive" className="feedback-message text-sm text-danger bg-danger/10 p-3 rounded-app" role="alert">
               {error}
             </p>
           )}
@@ -200,7 +210,7 @@ export function CreateCategoryDrawer({
             </button>
           </div>
         </form>
-      </div>
+      </Dialog>
     </div>
   );
 }

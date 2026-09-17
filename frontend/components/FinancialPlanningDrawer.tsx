@@ -1,7 +1,8 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useId, useState } from "react";
 import { WalletCards, X } from "@/components/icons";
+import { Dialog } from "@/components/Dialog";
 import { MoneyInput } from "@/components/MoneyInput";
 import { useDelayedPresence } from "@/lib/useDelayedPresence";
 import type { Settings } from "@/types/finance";
@@ -27,6 +28,7 @@ export function FinancialPlanningDrawer({ open, settings, onClose, onSave }: Fin
   });
   const [saving, setSaving] = useState(false);
   const { shouldRender, state } = useDelayedPresence(open, 180);
+  const titleId = useId();
 
   useEffect(() => {
     if (!open) return;
@@ -56,14 +58,20 @@ export function FinancialPlanningDrawer({ open, settings, onClose, onSave }: Fin
 
   return (
     <div className={`fixed inset-0 z-[220] bg-black/60 backdrop-blur-sm ${state === "open" ? "animate-overlay-in" : "animate-overlay-out"}`}>
-      <div className={`theme-surface absolute inset-x-0 bottom-0 max-h-[92vh] overflow-y-auto rounded-t-app border p-4 shadow-lift sm:left-auto sm:right-4 sm:top-4 sm:h-[calc(100vh-2rem)] sm:w-[420px] sm:rounded-app ${state === "open" ? "animate-pop-in" : "animate-pop-out"}`}>
+      <Dialog
+        busy={saving}
+        className={`theme-surface absolute inset-x-0 bottom-0 max-h-[92vh] overflow-y-auto rounded-t-app border p-4 shadow-lift sm:left-auto sm:right-4 sm:top-4 sm:h-[calc(100vh-2rem)] sm:w-[420px] sm:rounded-app ${state === "open" ? "animate-pop-in" : "animate-pop-out"}`}
+        onClose={onClose}
+        open={open}
+        titleId={titleId}
+      >
         <div className="mb-4 flex items-start justify-between gap-3">
           <div>
             <p className="flex items-center gap-2 text-sm font-semibold text-leaf">
               <WalletCards size={18} />
               Ajustes rápidos
             </p>
-            <h2 className="mt-1 text-xl font-black">Editar planejamento</h2>
+            <h2 className="mt-1 text-xl font-black" id={titleId}>Editar planejamento</h2>
             <p className="mt-1 text-sm text-muted">Atualize o salário, a reserva planejada e a meta diária usada no Resumo.</p>
           </div>
           <button className="focus-ring theme-control h-9 w-9 rounded-app border" type="button" onClick={onClose} aria-label="Fechar">
@@ -94,7 +102,7 @@ export function FinancialPlanningDrawer({ open, settings, onClose, onSave }: Fin
             </button>
           </div>
         </form>
-      </div>
+      </Dialog>
     </div>
   );
 }

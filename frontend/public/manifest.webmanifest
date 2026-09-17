@@ -1,0 +1,16 @@
+{
+  "name": "Trevo — suas finanças com sorte e método",
+  "short_name": "Trevo",
+  "description": "Acompanhe salário, despesas, metas, orçamento e parcelas em um só lugar.",
+  "start_url": "/",
+  "id": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F4F8F4",
+  "theme_color": "#1F8049",
+  "lang": "pt-BR",
+  "icons": [
+    { "src": "/apple-touch-icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/icon-maskable.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ]
+}

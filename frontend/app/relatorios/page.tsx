@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import dynamic from "next/dynamic";
 import { AlertTriangle, Download, FileText, TrendingUp, Wallet } from "@/components/icons";
-import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { ChartCard } from "@/components/ChartCard";
+import { ChartSkeleton } from "@/components/charts/ChartSkeleton";
 import { EmptyState } from "@/components/EmptyState";
 import { FeedbackMessage } from "@/components/FeedbackMessage";
 import { KpiCard } from "@/components/KpiCard";
@@ -17,6 +18,13 @@ import { formatBRL } from "@/lib/format";
 import { useTheme } from "@/lib/theme";
 import { useAuthToken } from "@/lib/useAuthToken";
 import type { ReportSummary } from "@/types/finance";
+
+// O recharts responde por ~110 kB do bundle de /relatorios. Sai do carregamento
+// inicial e chega junto com os dados, igual ao padrão de SummaryHome.tsx.
+const ReportBarChart = dynamic(() => import("@/components/charts/ReportBarChart"), {
+  ssr: false,
+  loading: () => <ChartSkeleton height={256} label="Carregando gráfico" />
+});
 
 async function downloadFile(url: string, token: string, filename: string) {
   const headers = token === COOKIE_AUTH_TOKEN ? undefined : { Authorization: `Bearer ${token}` };
@@ -141,6 +149,13 @@ export default function RelatoriosPage() {
     borderRadius: 12,
     color: effectiveTheme === "dark" ? "#E8EFF7" : "#102033"
   };
+  const chartTheme = {
+    grid: chartGrid,
+    text: chartText,
+    stroke: chartStroke,
+    cursorFill: effectiveTheme === "dark" ? "#1B2A40" : "#EEF6F8",
+    tooltipStyle
+  };
 
   return (
     <Shell>
@@ -206,15 +221,14 @@ export default function RelatoriosPage() {
             />
             <div className="h-64">
               {categoryRows.length && chartsReady ? (
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={categoryRows} margin={{ left: 4, right: 12, bottom: 24 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke={chartGrid} />
-                    <XAxis dataKey="name" tickLine={false} axisLine={false} tick={{ fontSize: 11, fill: chartText }} interval={0} angle={-18} textAnchor="end" />
-                    <YAxis width={54} tickFormatter={(value) => `R$${Number(value) / 1000}k`} tickLine={false} axisLine={false} tick={{ fill: chartText }} />
-                    <Tooltip contentStyle={tooltipStyle} cursor={{ fill: effectiveTheme === "dark" ? "#1B2A40" : "#EEF6F8" }} formatter={(value) => formatBRL(Number(value))} />
-                    <Bar dataKey="total" name="Gasto" fill="#14B8A6" radius={[6, 6, 0, 0]} activeBar={{ fillOpacity: 0.88, stroke: chartStroke, strokeWidth: 2 }} isAnimationActive animationDuration={650} animationEasing="ease-out" />
-                  </BarChart>
-                </ResponsiveContainer>
+                <ReportBarChart
+                  data={categoryRows}
+                  bars={[{ dataKey: "total", name: "Gasto", fill: "#14B8A6" }]}
+                  xAxisDataKey="name"
+                  theme={chartTheme}
+                  angledLabels
+                  margin={{ left: 4, right: 12, bottom: 24 }}
+                />
               ) : (
                 <EmptyState title="Sem categorias para analisar" description="Cadastre despesas para gerar o relatório por categoria." actionLabel="Cadastrar despesa" href="/transacoes" icon={FileText} />
               )}
@@ -240,15 +254,13 @@ export default function RelatoriosPage() {
             />
             <div className="h-64">
               {paymentRows.length && chartsReady ? (
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={paymentRows} margin={{ left: 4, right: 12, bottom: 18 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke={chartGrid} />
-                    <XAxis dataKey="label" tickLine={false} axisLine={false} tick={{ fontSize: 11, fill: chartText }} />
-                    <YAxis width={54} tickFormatter={(value) => `R$${Number(value) / 1000}k`} tickLine={false} axisLine={false} tick={{ fill: chartText }} />
-                    <Tooltip contentStyle={tooltipStyle} cursor={{ fill: effectiveTheme === "dark" ? "#1B2A40" : "#EEF6F8" }} formatter={(value) => formatBRL(Number(value))} />
-                    <Bar dataKey="total" name="Valor" fill="#4F46E5" radius={[6, 6, 0, 0]} activeBar={{ fillOpacity: 0.88, stroke: chartStroke, strokeWidth: 2 }} isAnimationActive animationDuration={650} animationEasing="ease-out" />
-                  </BarChart>
-                </ResponsiveContainer>
+                <ReportBarChart
+                  data={paymentRows}
+                  bars={[{ dataKey: "total", name: "Valor", fill: "#4F46E5" }]}
+                  xAxisDataKey="label"
+                  theme={chartTheme}
+                  margin={{ left: 4, right: 12, bottom: 18 }}
+                />
               ) : (
                 <EmptyState title="Sem formas de pagamento" description="Cadastre despesas para ver esta comparação." icon={Wallet} />
               )}
@@ -263,18 +275,18 @@ export default function RelatoriosPage() {
             />
             <div className="h-64">
               {trendRows.length && chartsReady ? (
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={trendRows} margin={{ left: 4, right: 12, bottom: 18 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke={chartGrid} />
-                    <XAxis dataKey="label" tickLine={false} axisLine={false} tick={{ fontSize: 11, fill: chartText }} />
-                    <YAxis width={54} tickFormatter={(value) => `R$${Number(value) / 1000}k`} tickLine={false} axisLine={false} tick={{ fill: chartText }} />
-                    <Tooltip contentStyle={tooltipStyle} cursor={{ fill: effectiveTheme === "dark" ? "#1B2A40" : "#EEF6F8" }} formatter={(value) => formatBRL(Number(value))} />
-                    <Legend />
-                    <Bar dataKey="inflow" name="Entradas" fill="#18A957" radius={[4, 4, 0, 0]} activeBar={{ fillOpacity: 0.88, stroke: chartStroke, strokeWidth: 2 }} isAnimationActive animationDuration={650} animationEasing="ease-out" />
-                    <Bar dataKey="outflow" name="Saídas" fill="#E14B5A" radius={[4, 4, 0, 0]} activeBar={{ fillOpacity: 0.88, stroke: chartStroke, strokeWidth: 2 }} isAnimationActive animationDuration={700} animationEasing="ease-out" />
-                    <Bar dataKey="net" name="Saldo" fill="#2F80ED" radius={[4, 4, 0, 0]} activeBar={{ fillOpacity: 0.88, stroke: chartStroke, strokeWidth: 2 }} isAnimationActive animationDuration={750} animationEasing="ease-out" />
-                  </BarChart>
-                </ResponsiveContainer>
+                <ReportBarChart
+                  data={trendRows}
+                  bars={[
+                    { dataKey: "inflow", name: "Entradas", fill: "#18A957", radius: [4, 4, 0, 0] },
+                    { dataKey: "outflow", name: "Saídas", fill: "#E14B5A", radius: [4, 4, 0, 0], animationDuration: 700 },
+                    { dataKey: "net", name: "Saldo", fill: "#2F80ED", radius: [4, 4, 0, 0], animationDuration: 750 }
+                  ]}
+                  xAxisDataKey="label"
+                  theme={chartTheme}
+                  showLegend
+                  margin={{ left: 4, right: 12, bottom: 18 }}
+                />
               ) : (
                 <EmptyState title="Sem evolução para mostrar" description="O histórico aparece quando houver movimentações ao longo dos meses." icon={TrendingUp} />
               )}
