@@ -19,6 +19,7 @@ for decimal parsing and duplicate-hash generation, then persist through
 deduplication and user-scoped authorization guarantees.
 
 See `docs/architecture/overview.md` for how `app/imports/` fits into the
-rest of the backend, and the vendor comparison (Pluggy vs. Belvo) planned
-for BP-12 of `docs/auditoria-2026-09.md` before any real implementation
-starts here.
+rest of the backend, and `docs/architecture/adr-open-finance.md` for the
+Pluggy vs. Belvo comparison, the `connections`/`sync_runs` domain model,
+and the current decision (postponed, with a re-evaluation trigger) before
+any real implementation starts here.
