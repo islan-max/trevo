@@ -4,15 +4,9 @@ from decimal import Decimal
 
 import pytest
 
-from app.main import (
-    SettingsPayload,
-    add_months,
-    distribute_installments,
-    format_brl,
-    round_money,
-    to_decimal,
-)
-from app.shared.dates import get_month_range
+from app.shared.dates import add_months, get_month_range
+from app.shared.money import distribute_installments, format_brl, round_money, to_decimal
+from app.users.schemas import SettingsPayload
 
 
 def test_format_brl():

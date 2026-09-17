@@ -10,6 +10,7 @@ from psycopg2.extras import RealDictCursor
 from psycopg2.pool import ThreadedConnectionPool
 
 from app.core.config import settings
+from migrate import pending_migrations
 
 logger = logging.getLogger("trevo.database")
 
@@ -120,3 +121,28 @@ def db_cursor(commit: bool = False):
             if commit:
                 conn.rollback()
             raise
+
+
+# OPS-01/CI-03: em serverless, isto já aplicou migrations a cada cold start —
+# incluindo DDL não-idempotente em custo (um DROP+ADD CONSTRAINT que toma
+# ACCESS EXCLUSIVE em transactions), serializada por advisory lock entre
+# instâncias concorrentes. Migrations agora rodam uma vez no build da Vercel
+# (buildCommand em vercel.json chama `python migrate.py`); aqui só se
+# VERIFICA se o banco está em dia, sem aplicar nada.
+_schema_checked = False
+
+
+def ensure_serverless_schema() -> None:
+    global _schema_checked
+    if _schema_checked or not settings.is_serverless:
+        return
+    _schema_checked = True  # uma checagem por processo, mesmo se falhar
+    try:
+        with connection() as conn:
+            pending = pending_migrations(conn)
+        if pending:
+            logger.warning("Migrations pendentes no banco: %s. Rode `python migrate.py` no deploy.", pending)
+        else:
+            logger.info("Schema em dia.")
+    except Exception:
+        logger.exception("Falha ao verificar o schema; servindo assim mesmo")

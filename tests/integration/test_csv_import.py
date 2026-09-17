@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from app.main import build_duplicate_hash, db_cursor
+from app.core.database import db_cursor
+from app.integrations.normalizer import build_duplicate_hash
 from tests.conftest import TEST_DB_URL
 
 pytestmark = pytest.mark.skipif(not TEST_DB_URL, reason="TEST_DATABASE_URL is not configured")

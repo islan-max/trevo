@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import pytest
 
+from app.auth.service import get_user_by_email
 from app.core.database import db_cursor
-from app.main import calculate_score, get_user_by_email
+from app.dashboard.service import calculate_score
 from app.shared.dates import get_current_month
 from tests.conftest import TEST_DB_URL, register_user
 
