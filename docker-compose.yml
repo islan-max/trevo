@@ -9,7 +9,7 @@ services:
     environment:
       ENVIRONMENT: development
       LOG_FORMAT: text
-      DATABASE_URL: postgresql://ritmo:ritmo_dev@db:5432/ritmo_dev
+      DATABASE_URL: postgresql://trevo:trevo_dev@db:5432/trevo_dev
       JWT_SECRET_KEY: local-dev-secret-key-change-before-production
       ALLOWED_ORIGINS: http://localhost:8000,http://127.0.0.1:8000
     volumes:
@@ -22,15 +22,15 @@ services:
   db:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: ritmo
-      POSTGRES_PASSWORD: ritmo_dev
-      POSTGRES_DB: ritmo_dev
+      POSTGRES_USER: trevo
+      POSTGRES_PASSWORD: trevo_dev
+      POSTGRES_DB: trevo_dev
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ritmo -d ritmo_dev"]
+      test: ["CMD-SHELL", "pg_isready -U trevo -d trevo_dev"]
       interval: 5s
       timeout: 5s
       retries: 10

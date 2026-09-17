@@ -163,7 +163,12 @@ Consulte também [OAuth](oauth.md) para login social.
 
 ## Render
 
-Use `render.yaml` como referência ou crie Web Service Docker/Python com as mesmas variáveis e health check `/api/health`.
+CFG-01: havia um `render.yaml` com `env: python`, mas o `buildCommand` só
+rodava `pip install` — nunca construía o frontend (`npm run build`), então o
+deploy servia a API sem a interface. Removido; use o `Dockerfile` do
+repositório (já constrói frontend e backend na mesma imagem) como **Web
+Service → Docker** no Render, com as mesmas variáveis de ambiente da seção
+[Railway](#railway) acima e health check `/api/health`.
 
 ## Checklist de segurança pré-produção
 

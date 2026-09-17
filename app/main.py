@@ -23,7 +23,7 @@ from app.budgets.router import router as budgets_router
 from app.cards.router import router as cards_router
 from app.categories.router import router as categories_router
 from app.core import storage
-from app.core.config import settings
+from app.core.config import APP_VERSION, settings
 from app.core.database import close_db_pool, connection, get_database_url, init_db_pool
 from app.core.logging import JsonLogFormatter
 from app.core.startup import validate_runtime_config
@@ -93,7 +93,7 @@ async def lifespan(_app: FastAPI):
         close_db_pool()
 
 
-app = FastAPI(title="Trevo API", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="Trevo API", version=APP_VERSION, lifespan=lifespan)
 app.router.route_class = PlainDictRoute
 app.state.limiter = limiter
 if not settings.is_serverless:

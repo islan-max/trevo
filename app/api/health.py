@@ -10,6 +10,7 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
 from app.api.deps import PlainDictRoute
+from app.core.config import APP_VERSION
 from app.core.database import db_cursor
 from app.core.signing import secret_source
 
@@ -39,7 +40,7 @@ def health():
         return {
             "ok": True,
             "db": "connected",
-            "version": "2.0.0",
+            "version": APP_VERSION,
             "uptime_seconds": int(time.time() - startup_time),
             "checks": {
                 "database": {"status": "ok", "latency_ms": latency_ms},
@@ -57,7 +58,7 @@ def health():
             {
                 "ok": False,
                 "db": "error",
-                "version": "2.0.0",
+                "version": APP_VERSION,
                 "uptime_seconds": int(time.time() - startup_time),
                 "checks": {
                     "database": {"status": "error", "latency_ms": None},

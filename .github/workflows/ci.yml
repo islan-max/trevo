@@ -3,6 +3,7 @@ name: CI/CD
 on:
   push:
     branches: [main, develop]
+    tags: ["v*"]
   pull_request:
     branches: [main]
 
@@ -17,9 +18,9 @@ jobs:
       postgres:
         image: postgres:16-alpine
         env:
-          POSTGRES_USER: ritmo
-          POSTGRES_PASSWORD: ritmo_test
-          POSTGRES_DB: ritmo_test
+          POSTGRES_USER: trevo
+          POSTGRES_PASSWORD: trevo_test
+          POSTGRES_DB: trevo_test
         options: >-
           --health-cmd pg_isready
           --health-interval 5s
@@ -33,15 +34,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -r requirements.txt
+      - run: pip install -r requirements-dev.txt
       - name: Arquivos de código ignorados pelo .gitignore
         run: bash scripts/check-ignored-files.sh
       - run: python -m ruff check .
       - run: python -m bandit -r app -ll -q
       - name: Run tests
         env:
-          DATABASE_URL: postgresql://ritmo:ritmo_test@localhost:5432/ritmo_test
-          TEST_DATABASE_URL: postgresql://ritmo:ritmo_test@localhost:5432/ritmo_test
+          DATABASE_URL: postgresql://trevo:trevo_test@localhost:5432/trevo_test
+          TEST_DATABASE_URL: postgresql://trevo:trevo_test@localhost:5432/trevo_test
           JWT_SECRET_KEY: ci-secret-key-for-testing-only-32chars
           ENVIRONMENT: testing
           ALLOWED_ORIGINS: http://localhost:8000
@@ -51,8 +52,8 @@ jobs:
         run: pytest tests/ -q --cov=app --cov-report=term-missing --cov-report=xml --cov-fail-under=60 -p no:randomly --strict-markers -rs
       - name: Falhar se algum teste foi pulado
         env:
-          DATABASE_URL: postgresql://ritmo:ritmo_test@localhost:5432/ritmo_test
-          TEST_DATABASE_URL: postgresql://ritmo:ritmo_test@localhost:5432/ritmo_test
+          DATABASE_URL: postgresql://trevo:trevo_test@localhost:5432/trevo_test
+          TEST_DATABASE_URL: postgresql://trevo:trevo_test@localhost:5432/trevo_test
           JWT_SECRET_KEY: ci-secret-key-for-testing-only-32chars
           ENVIRONMENT: testing
           ALLOWED_ORIGINS: http://localhost:8000
@@ -96,9 +97,13 @@ jobs:
       # ou ao migrar de python-jose para PyJWT.
       - run: pip-audit -r requirements.txt --strict --ignore-vuln PYSEC-2026-1325
 
+  # CI-02: publicava imagem no GHCR a cada push em main, e nada consumia essa
+  # imagem (o deploy é Vercel — ver docs/guides/deployment.md). Só roda numa
+  # tag de release (vX.Y.Z), para quem usa Docker (Railway/Render/self-host)
+  # ter uma imagem versionada para além do "latest" sempre mutável.
   build-and-push:
     needs: [test, security-scan]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -119,6 +124,7 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
+            type=semver,pattern={{version}}
             type=sha,prefix=sha-
             type=raw,value=latest
       - uses: docker/build-push-action@v5
