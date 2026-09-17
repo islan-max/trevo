@@ -184,12 +184,21 @@ export default function PerfilPage() {
     event.preventDefault();
     if (!token) return;
     const form = new FormData(event.currentTarget);
-    await api.changePassword(token, {
-      current_password: String(form.get("current_password")),
-      new_password: String(form.get("new_password"))
-    });
-    event.currentTarget.reset();
-    setMessage("Senha atualizada.");
+    try {
+      await api.changePassword(token, {
+        current_password: String(form.get("current_password")),
+        new_password: String(form.get("new_password"))
+      });
+      // UX-03: o backend invalida o token atual assim que a senha muda
+      // (password_changed_at). Sem isto, o usuário ficava nesta página com a
+      // sessão já morta e só descobria ao esbarrar num 401 sem explicação em
+      // alguma ação futura. Aqui o redirecionamento é proposital e explicado.
+      event.currentTarget.reset();
+      clearSession();
+      router.replace("/login?reason=password-changed");
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Falha ao trocar senha.");
+    }
   }
 
   async function exportData() {

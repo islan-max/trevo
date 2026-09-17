@@ -154,6 +154,14 @@ export default function ImportarPage() {
   const [selectedFileName, setSelectedFileName] = useState("");
   const [busyState, setBusyState] = useState<"upload" | "preview" | "confirm" | "rule" | "categorize" | "">("");
 
+  // UX-05: handlePreview/handleConfirm/categorizeTransaction já tratam seus
+  // próprios erros internamente (setMessage), mas os handlers de evento que os
+  // chamam ainda precisam de um .catch — sem ele, uma falha inesperada fora do
+  // try/catch interno virava só um console.error, sem nada visível na tela.
+  function reportUnexpectedError(err: unknown) {
+    setMessage(err instanceof Error ? err.message : "Falha inesperada.");
+  }
+
   useEffect(() => {
     if (!token) return;
     api.bootstrap(token, new Date().toISOString().slice(0, 7))
@@ -379,7 +387,7 @@ export default function ImportarPage() {
                   <SelectField label="Conta ou origem, se existir" helper="Banco, carteira ou forma de pagamento" options={columns} value={mapping.account || ""} onChange={(account) => setMapping({ ...mapping, account })} />
                   <SelectField label="Hora, se estiver em coluna separada" helper="Quando a data não traz o horário" options={columns} value={mapping.time || ""} onChange={(time) => setMapping({ ...mapping, time })} />
                 </div>
-                <button className="btn-primary mt-4" type="button" onClick={() => handlePreview().catch(console.error)} disabled={!mappingReady || busyState === "preview"}>
+                <button className="btn-primary mt-4" type="button" onClick={() => handlePreview().catch(reportUnexpectedError)} disabled={!mappingReady || busyState === "preview"}>
                   <ListChecks size={16} aria-hidden />
                   {busyState === "preview" ? "Gerando prévia..." : "Revisar prévia"}
                 </button>
@@ -480,7 +488,7 @@ export default function ImportarPage() {
               title="Prévia ainda não gerada"
               description="Mapeie as colunas e revise a prévia antes de confirmar qualquer importação."
               actionLabel={upload ? "Revisar prévia" : undefined}
-              onAction={upload ? () => handlePreview().catch(console.error) : undefined}
+              onAction={upload ? () => handlePreview().catch(reportUnexpectedError) : undefined}
               icon={ListChecks}
             />
           )}
@@ -513,7 +521,7 @@ export default function ImportarPage() {
                       <select
                         className="field"
                         disabled={busyState === "categorize"}
-                        onChange={(event) => categorizeTransaction(transaction, event.target.value).catch(console.error)}
+                        onChange={(event) => categorizeTransaction(transaction, event.target.value).catch(reportUnexpectedError)}
                         value={transaction.category_id ? String(transaction.category_id) : ""}
                       >
                         <option value="">Categorizar</option>
@@ -555,7 +563,7 @@ export default function ImportarPage() {
         busy={busyState === "confirm"}
         onCancel={() => setConfirmOpen(false)}
         onConfirm={(mode) => {
-          handleConfirm(mode).catch(console.error);
+          handleConfirm(mode).catch(reportUnexpectedError);
         }}
         open={confirmOpen}
         preview={preview}

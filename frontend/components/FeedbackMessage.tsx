@@ -65,6 +65,7 @@ export function FeedbackMessage({ message, tone = "auto", className = "" }: Feed
 
   return (
     <div
+      aria-live={resolvedTone === "error" ? "assertive" : "polite"}
       className={`feedback-message mb-4 flex items-start gap-3 rounded-app border p-3 text-sm shadow-soft ${toneClass[resolvedTone]} ${className}`}
       role={role}
     >

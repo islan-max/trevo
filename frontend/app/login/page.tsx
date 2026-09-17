@@ -16,6 +16,7 @@ export default function LoginPage() {
   const router = useRouter();
   const { effectiveTheme, preference, setPreference } = useTheme();
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
 
   useEffect(() => {
     let active = true;
@@ -32,6 +33,16 @@ export default function LoginPage() {
     };
   }, [router]);
 
+  useEffect(() => {
+    // UX-03: chega aqui logo após trocar a senha em /perfil, quando o token
+    // anterior já foi invalidado pelo backend — sem isto, o motivo do
+    // redirecionamento para /login se perdia.
+    if (new URLSearchParams(window.location.search).get("reason") === "password-changed") {
+      setNotice("Senha atualizada. Faça login novamente para continuar.");
+      window.history.replaceState(null, "", "/login");
+    }
+  }, []);
+
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
@@ -40,6 +51,7 @@ export default function LoginPage() {
       rememberSession();
       router.replace("/dashboard");
     } catch (err) {
+      setNotice("");
       setError(err instanceof Error ? err.message : "Falha ao entrar.");
     }
   }
@@ -97,7 +109,16 @@ export default function LoginPage() {
               <input className="field mt-1" name="password" type="password" autoComplete="current-password" required />
             </label>
 
-            {error ? <p className="mt-3 rounded-app bg-danger/10 p-3 text-sm text-danger">{error}</p> : null}
+            {notice ? (
+              <p aria-live="polite" className="mt-3 rounded-app bg-success/10 p-3 text-sm text-success">
+                {notice}
+              </p>
+            ) : null}
+            {error ? (
+              <p aria-live="polite" className="mt-3 rounded-app bg-danger/10 p-3 text-sm text-danger">
+                {error}
+              </p>
+            ) : null}
 
             <button className="btn-primary mt-5 w-full" type="submit">
               Entrar

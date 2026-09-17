@@ -2,6 +2,7 @@
 
 import { useEffect, useId, useRef, useState } from "react";
 import { AlertTriangle, Check, Layers3, X } from "@/components/icons";
+import { Dialog } from "@/components/Dialog";
 import { formatBRL } from "@/lib/format";
 import type { CsvImportMode, CsvPreview } from "@/types/finance";
 
@@ -25,47 +26,11 @@ export function ImportConfirmDialog({ open, preview, busy = false, onCancel, onC
   const [mode, setMode] = useState<CsvImportMode>("merge");
   const titleId = useId();
   const descriptionId = useId();
-  const dialogRef = useRef<HTMLDivElement | null>(null);
   const confirmRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
     if (open) setMode("merge");
   }, [open]);
-
-  // Foco entra no diálogo ao abrir; Esc fecha; Tab circula dentro dele.
-  useEffect(() => {
-    if (!open) return;
-    const previouslyFocused = document.activeElement as HTMLElement | null;
-    confirmRef.current?.focus();
-
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape" && !busy) {
-        event.preventDefault();
-        onCancel();
-        return;
-      }
-      if (event.key !== "Tab" || !dialogRef.current) return;
-      const focusables = dialogRef.current.querySelectorAll<HTMLElement>(
-        'button:not([disabled]), [href], input:not([disabled]), select, textarea, [tabindex]:not([tabindex="-1"])'
-      );
-      if (!focusables.length) return;
-      const first = focusables[0];
-      const last = focusables[focusables.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    }
-
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("keydown", onKeyDown);
-      previouslyFocused?.focus?.();
-    };
-  }, [open, busy, onCancel]);
 
   if (!open || !preview) return null;
 
@@ -75,13 +40,14 @@ export function ImportConfirmDialog({ open, preview, busy = false, onCancel, onC
 
   return (
     <div className="floating-layer inset-0 flex items-end justify-center bg-ink/60 p-0 backdrop-blur-sm sm:items-center sm:p-4">
-      <div
-        aria-describedby={descriptionId}
-        aria-labelledby={titleId}
-        aria-modal="true"
+      <Dialog
+        busy={busy}
         className="animate-pop-in max-h-[92vh] w-full max-w-lg overflow-y-auto rounded-t-2xl border border-line bg-surface p-5 shadow-lift sm:rounded-app"
-        ref={dialogRef}
-        role="dialog"
+        describedById={descriptionId}
+        initialFocusRef={confirmRef}
+        onClose={onCancel}
+        open={open}
+        titleId={titleId}
       >
         <div className="flex items-start justify-between gap-3">
           <div>
@@ -185,7 +151,7 @@ export function ImportConfirmDialog({ open, preview, busy = false, onCancel, onC
             {busy ? "Importando..." : mode === "replace" ? "Substituir e importar" : "Mesclar e importar"}
           </button>
         </div>
-      </div>
+      </Dialog>
     </div>
   );
 }
