@@ -26,7 +26,7 @@ export default function MetasPage() {
     Promise.all([api.goals(token, month), api.transactions(token, { month })])
       .then(([nextGoal, nextTransactions]) => {
         setGoal(nextGoal);
-        setTransactions(nextTransactions);
+        setTransactions(nextTransactions.items);
       })
       .catch((err) => setMessage(err instanceof Error ? err.message : "Falha ao carregar."));
   }, [token, month]);

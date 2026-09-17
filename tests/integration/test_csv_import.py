@@ -194,7 +194,7 @@ async def test_csv_replace_mode_preserves_manual_and_installment_transactions(cl
     assert confirm_response.json()["replaced"] == 0
 
     remaining = await client.get("/api/transactions", headers=auth_headers, params={"month": "2024-05"})
-    remaining_ids = {row["id"] for row in remaining.json()}
+    remaining_ids = {row["id"] for row in remaining.json()["items"]}
     assert manual_id in remaining_ids
     assert installment_id in remaining_ids
 

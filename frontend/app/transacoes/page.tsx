@@ -36,6 +36,8 @@ const emptyForm = (month: string, type: TransactionType = "expense"): MovementFo
   isRecurring: false
 });
 
+const TRANSACTIONS_PAGE_SIZE = 50;
+
 export default function TransacoesPage() {
   const token = useAuthToken();
   const [month] = useState(new Date().toISOString().slice(0, 7));
@@ -48,21 +50,47 @@ export default function TransacoesPage() {
   const [sourceFilter, setSourceFilter] = useState("");
   const [message, setMessage] = useState("");
   const [saving, setSaving] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
 
   const load = useCallback(async () => {
     if (!token) return;
-    const [boot, transactions] = await Promise.all([
+    const [boot, page] = await Promise.all([
       api.bootstrap(token, month) as Promise<Bootstrap>,
-      api.transactions(token, { month, search, type: typeFilter, source: sourceFilter })
+      api.transactions(token, { month, search, type: typeFilter, source: sourceFilter, limit: TRANSACTIONS_PAGE_SIZE, offset: 0 })
     ]);
     setCategories(boot.categories);
     setMonthItems(boot.transactions);
-    setItems(transactions);
+    setItems(page.items);
+    setHasMore(page.hasMore);
   }, [token, month, search, typeFilter, sourceFilter]);
 
   useEffect(() => {
     load().catch((err) => setMessage(err instanceof Error ? err.message : "Falha ao carregar."));
   }, [load]);
+
+  // DB-08: a lista vinha truncada num LIMIT 250 fixo, sem indicar que havia
+  // mais. Agora o backend pagina de verdade (limit/offset + hasMore).
+  async function loadMore() {
+    if (!token || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const page = await api.transactions(token, {
+        month,
+        search,
+        type: typeFilter,
+        source: sourceFilter,
+        limit: TRANSACTIONS_PAGE_SIZE,
+        offset: items.length
+      });
+      setItems((current) => [...current, ...page.items]);
+      setHasMore(page.hasMore);
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Falha ao carregar mais movimentações.");
+    } finally {
+      setLoadingMore(false);
+    }
+  }
 
   const totals = useMemo(() => ({
     expense: monthItems.filter((item) => item.type === "expense").length,
@@ -341,6 +369,14 @@ export default function TransacoesPage() {
                     onAction={() => startNew(typeFilter || "expense")}
                     icon={typeFilter === "income" ? ArrowUpCircle : ArrowDownCircle}
                   />
+                </div>
+              ) : null}
+              {hasMore ? (
+                <div className="py-4 text-center">
+                  <button className="btn-secondary" disabled={loadingMore} onClick={() => loadMore()} type="button">
+                    {loadingMore ? <LoaderCircle className="animate-spin" size={16} aria-hidden /> : null}
+                    {loadingMore ? "Carregando..." : "Carregar mais"}
+                  </button>
                 </div>
               ) : null}
             </div>
