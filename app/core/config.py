@@ -3,6 +3,11 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+# CFG-06: estava escrita em três lugares (FastAPI(version=...) e duas vezes
+# no handler de /api/health) — uma delas ficaria desatualizada na próxima
+# mudança de versão sem ninguém perceber. Acompanha CHANGELOG.md.
+APP_VERSION = "2.0.0"
+
 
 @dataclass(frozen=True)
 class Settings:

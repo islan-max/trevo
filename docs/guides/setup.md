@@ -19,10 +19,13 @@ Edite `.env` com `DATABASE_URL` e `JWT_SECRET_KEY` (mínimo 32 caracteres).
 ## 2. Banco e backend
 
 ```bash
-python -m pip install -r requirements.txt
+python -m pip install -r requirements-dev.txt
 python migrate.py
 python -m uvicorn main:app --reload --port 8000
 ```
+
+`requirements-dev.txt` inclui `requirements.txt` (produção) mais pytest/ruff/bandit —
+o passo 5 abaixo (ruff, pytest) depende deles.
 
 Health: `http://localhost:8000/api/health`
 

@@ -18,11 +18,11 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
+import jwt
 from fastapi import Cookie, Depends, Request, Response, status
 from fastapi.exceptions import HTTPException
 from fastapi.routing import APIRoute
 from fastapi.security import OAuth2PasswordBearer
-from jose import JWTError, jwt
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -83,8 +83,8 @@ def get_jwt_secret() -> str:
 
 def decode_token_metadata(token: str) -> tuple[str | None, datetime | None]:
     try:
-        claims = jwt.get_unverified_claims(token)
-    except JWTError:
+        claims = jwt.decode(token, options={"verify_signature": False})
+    except jwt.PyJWTError:
         return None, None
     user_id = str(claims.get("sub")) if claims.get("sub") else None
     expires_at = None
@@ -219,7 +219,7 @@ def get_current_user(
         user_uuid = UUID(str(subject))
         issued_at_claim = payload.get("iat")
         expires_at_claim = payload.get("exp")
-    except (JWTError, ValueError):
+    except (jwt.PyJWTError, ValueError):
         raise credentials_error from None
 
     user = get_user_by_id(str(user_uuid))

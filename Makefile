@@ -8,10 +8,10 @@ test-integration:
 	pytest tests/integration/ -v
 
 lint:
-	ruff check app/ tests/
+	ruff check .
 
 format:
-	ruff format app/ tests/
+	ruff format .
 
 run-dev:
 	uvicorn main:app --reload --port 8000

@@ -10,9 +10,9 @@ from dataclasses import dataclass
 from urllib.parse import urlencode
 
 import httpx
+import jwt
 from fastapi import HTTPException
 from fastapi.responses import RedirectResponse
-from jose import JWTError, jwt
 
 from app.core.signing import resolve_jwt_secret
 
@@ -245,7 +245,7 @@ def consume_oauth_state(state: str, provider: str, cookie_state: str | None) -> 
         raise HTTPException(status_code=400, detail="State OAuth inválido ou expirado.")
     try:
         payload = jwt.decode(state, resolve_jwt_secret(), algorithms=[OAUTH_STATE_ALG])
-    except JWTError:
+    except jwt.PyJWTError:
         raise HTTPException(status_code=400, detail="State OAuth inválido ou expirado.") from None
     if payload.get("provider") != provider:
         raise HTTPException(status_code=400, detail="State OAuth inválido ou expirado.")
